@@ -1,0 +1,12 @@
+diff --git a/src/libos/Makefile b/src/libos/Makefile
+index 3192a4a..b5bca5e 100644
+--- a/src/libos/Makefile
++++ b/src/libos/Makefile
+@@ -1,6 +1,6 @@
+ include ../sgxenv.mk
+
+-DEBUG=1
++DEBUG=0
+
+ LIBOS_ENCLAVE := libocclum.signed.so
+ LIBOS_SO := libocclum.so # Link $(LIBOS_A), $(C_OBJS) and all dependencies

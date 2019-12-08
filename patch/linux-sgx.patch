@@ -1,0 +1,1846 @@
+diff --git a/buildenv.mk b/buildenv.mk
+index 1d32d27..4e5a5fb 100644
+--- a/buildenv.mk
++++ b/buildenv.mk
+@@ -69,13 +69,13 @@ INCLUDE :=
+ # this will return the path to the file that included the buildenv.mk file
+ CUR_DIR := $(realpath $(call parent-dir,$(lastword $(wordlist 2,$(words $(MAKEFILE_LIST)),x $(MAKEFILE_LIST)))))
+ 
+-# turn on stack protector for SDK
+-CC_BELOW_4_9 := $(shell expr "`$(CC) -dumpversion`" \< "4.9")
+-ifeq ($(CC_BELOW_4_9), 1)
+-    COMMON_FLAGS += -fstack-protector
+-else
+-    COMMON_FLAGS += -fstack-protector-strong
+-endif
++# turn off stack protector for SDK for Occlum.
++#
++# The reason that stack protector must be disabled for Occlum is that stack 
++# protector and Occlum use %fs in a different way: Stack protector uses %fs 
++# to find the canary value (%fs:0x28), while Occlum sets fs base address to the 
++# offset between the code domain and the data domain of the current SIP.
++COMMON_FLAGS += -fno-stack-protector
+ 
+ ifdef DEBUG
+     COMMON_FLAGS += -O0 -ggdb -DDEBUG -UNDEBUG
+diff --git a/common/inc/internal/thread_data.h b/common/inc/internal/thread_data.h
+index 2d38330..c8a5376 100644
+--- a/common/inc/internal/thread_data.h
++++ b/common/inc/internal/thread_data.h
+@@ -112,6 +112,16 @@ typedef struct _thread_data_t
+ #endif
+     sys_word_t  cxx_thread_info[6];
+     sys_word_t  stack_commit_addr;
++    // Occlum notes:
++    // The default stack is defined by SGX SDK (see stack_base_addr and
++    // stack_limit_addr). To support user-defined stacks (e.g., Occlum allocates
++    // stacks for user programs running upon Occlum), this struct is extended
++    // with the info about the optional user-defined stack associated with a
++    // SGX thread. The enclave exception handler uses this additional info
++    // about user-defined stacks to validate the stack pointers.
++    sys_word_t  user_stack_is_enabled;
++    sys_word_t  user_stack_base_addr;
++    sys_word_t  user_stack_limit_addr;
+ } thread_data_t;
+ 
+ #ifdef __cplusplus
+diff --git a/common/inc/sgx_attributes.h b/common/inc/sgx_attributes.h
+index c407c93..7799731 100644
+--- a/common/inc/sgx_attributes.h
++++ b/common/inc/sgx_attributes.h
+@@ -49,7 +49,9 @@
+ #define SGX_XFRM_AVX512          0x00000000000000E6ULL     /* AVX-512 XFRM - not supported */
+ #define SGX_XFRM_MPX             0x0000000000000018ULL     /* MPX XFRM - not supported */
+ 
+-#define SGX_XFRM_RESERVED        (~(SGX_XFRM_LEGACY | SGX_XFRM_AVX))
++/* Occlum notes:
++ * Enable MPX by default */
++#define SGX_XFRM_RESERVED        (~(SGX_XFRM_LEGACY | SGX_XFRM_AVX | SGX_XFRM_MPX))
+ 
+ typedef struct _attributes_t
+ {
+diff --git a/common/inc/sgx_tprotected_fs.edl b/common/inc/sgx_tprotected_fs.edl
+index 59e8e66..02fd46e 100644
+--- a/common/inc/sgx_tprotected_fs.edl
++++ b/common/inc/sgx_tprotected_fs.edl
+@@ -14,7 +14,6 @@
+  *   * Neither the name of Intel Corporation nor the names of its
+  *     contributors may be used to endorse or promote products derived
+  *     from this software without specific prior written permission.
+- *
+  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+  * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+diff --git a/common/inc/sgx_tprotected_fs.h b/common/inc/sgx_tprotected_fs.h
+index 8fc9d88..e2311b5 100644
+--- a/common/inc/sgx_tprotected_fs.h
++++ b/common/inc/sgx_tprotected_fs.h
+@@ -45,6 +45,7 @@
+ 
+ #include "sgx_defs.h"
+ #include "sgx_key.h"
++#include "sgx_tcrypto.h"
+ 
+ #define SGX_FILE void
+ 
+@@ -94,6 +95,20 @@ SGX_FILE* SGXAPI sgx_fopen(const char* filename, const char* mode, const sgx_key
+ SGX_FILE* SGXAPI sgx_fopen_auto_key(const char* filename, const char* mode);
+ 
+ 
++/* sgx_fopen_integrity_only
++*  Purpose: open existing protected file (created with previous call to sgx_fopen_integrity_only) or create a new one (see c++ fopen documentation for more details).
++*           This API skips encryption and only performs MAC calculation/validation, thus protecting the file's integrity, not confidentiality.
++*
++*  Parameters:
++*      filename - [IN] the name of the file to open/create.
++*      mode - [IN] open mode. only supports 'r' or 'w' or 'a' (one and only one of them must be present), and optionally 'b' and/or '+'.
++*
++*  Return value:
++*     SGX_FILE*  - pointer to the newly created file handle, NULL if an error occurred - check errno for the error code.
++*/
++SGX_FILE* SGXAPI sgx_fopen_integrity_only(const char* filename, const char* mode);
++
++
+ /* sgx_fwrite
+  *  Purpose: write data to a file (see c++ fwrite documentation for more details).
+  *
+@@ -101,7 +116,7 @@ SGX_FILE* SGXAPI sgx_fopen_auto_key(const char* filename, const char* mode);
+  *      ptr - [IN] pointer to the input data buffer
+  *      size - [IN] size of data block
+  *      count - [IN] count of data blocks to write
+- *      stream - [IN] the file handle (opened with sgx_fopen or sgx_fopen_auto_key)
++ *      stream - [IN] the file handle (opened with sgx_fopen*)
+  *
+  *  Return value:
+  *     size_t  - number of 'size' blocks written to the file, 0 in case of an error - check sgx_ferror for error code
+@@ -116,7 +131,7 @@ size_t SGXAPI sgx_fwrite(const void* ptr, size_t size, size_t count, SGX_FILE* s
+  *      ptr - [OUT] pointer to the output data buffer
+  *      size - [IN] size of data block
+  *      count - [IN] count of data blocks to write
+- *      stream - [IN] the file handle (opened with sgx_fopen or sgx_fopen_auto_key)
++ *      stream - [IN] the file handle (opened with sgx_fopen*)
+  *
+  *  Return value:
+  *     size_t  - number of 'size' blocks read from the file, 0 in case of an error - check sgx_ferror for error code
+@@ -128,7 +143,7 @@ size_t SGXAPI sgx_fread(void* ptr, size_t size, size_t count, SGX_FILE* stream);
+  *  Purpose: get the current value of the position indicator of the file (see c++ ftell documentation for more details).
+  *
+  *  Parameters:
+- *      stream - [IN] the file handle (opened with sgx_fopen or sgx_fopen_auto_key)
++ *      stream - [IN] the file handle (opened with sgx_fopen*)
+  *
+  *  Return value:
+  *     int64_t  - the current value of the position indicator, -1 on error - check errno for the error code
+@@ -140,7 +155,7 @@ int64_t SGXAPI sgx_ftell(SGX_FILE* stream);
+  *  Purpose: set the current value of the position indicator of the file (see c++ fseek documentation for more details).
+  *
+  *  Parameters:
+- *      stream - [IN] the file handle (opened with sgx_fopen or sgx_fopen_auto_key)
++ *      stream - [IN] the file handle (opened with sgx_fopen*)
+  *      offset - [IN] the new required value, relative to the origin parameter
+  *      origin - [IN] the origin from which to calculate the offset (SEEK_SET, SEEK_CUR or SEEK_END)
+  *
+@@ -154,7 +169,7 @@ int32_t SGXAPI sgx_fseek(SGX_FILE* stream, int64_t offset, int origin);
+  *  Purpose: force actual write of all the cached data to the disk (see c++ fflush documentation for more details).
+  *
+  *  Parameters:
+- *      stream - [IN] the file handle (opened with sgx_fopen or sgx_fopen_auto_key)
++ *      stream - [IN] the file handle (opened with sgx_fopen*)
+  *
+  *  Return value:
+  *     int32_t  - result, 0 on success, 1 in case of an error - check sgx_ferror for error code
+@@ -166,7 +181,7 @@ int32_t SGXAPI sgx_fflush(SGX_FILE* stream);
+  *  Purpose: get the latest operation error code (see c++ ferror documentation for more details).
+  *
+  *  Parameters:
+- *      stream - [IN] the file handle (opened with sgx_fopen or sgx_fopen_auto_key)
++ *      stream - [IN] the file handle (opened with sgx_fopen*)
+  *
+  *  Return value:
+  *     int32_t  - the error code, 0 means no error, anything else is the latest operation error code
+@@ -178,7 +193,7 @@ int32_t SGXAPI sgx_ferror(SGX_FILE* stream);
+  *  Purpose: did the file's position indicator hit the end of the file in a previous read operation (see c++ feof documentation for more details).
+  *
+  *  Parameters:
+- *      stream - [IN] the file handle (opened with sgx_fopen or sgx_fopen_auto_key)
++ *      stream - [IN] the file handle (opened with sgx_fopen*)
+  *
+  *  Return value:
+  *     int32_t  - 1 - end of file was reached, 0 - end of file wasn't reached
+@@ -191,7 +206,7 @@ int32_t SGXAPI sgx_feof(SGX_FILE* stream);
+  *           call sgx_ferror or sgx_feof after a call to this function to learn if it was successful or not
+  *
+  *  Parameters:
+- *      stream - [IN] the file handle (opened with sgx_fopen or sgx_fopen_auto_key)
++ *      stream - [IN] the file handle (opened with sgx_fopen*)
+  *
+  *  Return value:
+  *      none
+@@ -204,7 +219,7 @@ void SGXAPI sgx_clearerr(SGX_FILE* stream);
+  *           after a call to this function, the handle is invalid even if an error is returned
+  *
+  *  Parameters:
+- *      stream - [IN] the file handle (opened with sgx_fopen or sgx_fopen_auto_key)
++ *      stream - [IN] the file handle (opened with sgx_fopen*)
+  *
+  *  Return value:
+  *     int32_t  - result, 0 - file was closed successfully, 1 - there were errors during the operation
+@@ -261,7 +276,7 @@ int32_t SGXAPI sgx_fimport_auto_key(const char* filename, const sgx_key_128bit_t
+ *                  if a user wishes to remove all secrets from memory, he should close the file handle with sgx_fclose
+ *
+ *  Parameters:
+-*      stream - [IN] the file handle (opened with sgx_fopen or sgx_fopen_auto_key
++*      stream - [IN] the file handle (opened with sgx_fopen*)
+ *
+ *  Return value:
+ *     int32_t  - result, 0 - success, 1 - there was an error, check errno for the error code
+@@ -269,6 +284,19 @@ int32_t SGXAPI sgx_fimport_auto_key(const char* filename, const sgx_key_128bit_t
+ int32_t SGXAPI sgx_fclear_cache(SGX_FILE* stream);
+ 
+ 
++/* sgx_fget_mac
++*  Purpose: get the MAC of the file. To ensure the MAC reflects all the content in the file,
++*  sgx_fflush will be called automatically before getting the MAC. It is the caller's responsibility of not doing any writes before
++*  this function returns the MAC.
++*
++*  Parameters:
++*      stream - [IN] the file handle (opened with sgx_fopen*)
++*
++*  Return value:
++*     int32_t  - result, 0 - success, 1 - there was an error, check errno for the error code
++*/
++int32_t SGXAPI sgx_fget_mac(SGX_FILE* stream, sgx_aes_gcm_128bit_tag_t* mac);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/common/inc/sgx_trts.h b/common/inc/sgx_trts.h
+index 044d0a8..6f71a7d 100644
+--- a/common/inc/sgx_trts.h
++++ b/common/inc/sgx_trts.h
+@@ -82,6 +82,33 @@ int SGXAPI sgx_is_enclave_crashed(void) __attribute__((section(".nipx")));
+ */
+ sgx_status_t SGXAPI sgx_read_rand(unsigned char *rand, size_t length_in_bytes);
+ 
++
++/* sgx_enable_user_stack()
++ *
++ * Added for Occlum
++ *
++ * Enable a user-defined stack for the current SGX thread. By letting SGX SDK
++ * be aware of this user-defined stack, SGX SDK can validate a stack pointer
++ * against either the SGX-defined stack or the user-defined stack.
++ *
++ * Parameters:
++ *      stack_base - the top of the stack (the highest address)
++ *      stack_limit - the bottom of the stack (the lowest address)
++ * Return Value:
++ *      SGX_SUCCESS - success
++ *      SGX_ERROR_INVALID_PARAMETER - the parameter is invalid
++*/
++int SGXAPI sgx_enable_user_stack(size_t stack_base, size_t stack_limit);
++
++
++/* sgx_disable_user_stack()
++ *
++ * Added for Occlum
++ *
++ * Disable the user-defined stack.
++*/
++void SGXAPI sgx_disable_user_stack(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/compile.sh b/compile.sh
+new file mode 100755
+index 0000000..b3009a5
+--- /dev/null
++++ b/compile.sh
+@@ -0,0 +1,4 @@
++#!/bin/bash
++make clean
++make -j
++make sdk_install_pkg psw_install_pkg
+diff --git a/install.sh b/install.sh
+new file mode 100755
+index 0000000..aec4cf1
+--- /dev/null
++++ b/install.sh
+@@ -0,0 +1,11 @@
++#!/bin/bash
++pushd `dirname $0` > /dev/null
++SCRIPT_PATH=`pwd`
++popd > /dev/null
++
++sudo /opt/intel/sgxpsw/uninstall.sh
++sudo /opt/intel/sgxsdk/uninstall.sh
++sudo mkdir -p /opt/intel
++cd /opt/intel
++sudo ${SCRIPT_PATH}/linux/installer/bin/sgx_linux_x64_psw_*.bin
++yes yes | sudo ${SCRIPT_PATH}/linux/installer/bin/sgx_linux_x64_sdk_*.bin
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_crypto.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_crypto.cpp
+index b9a5645..14a6697 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_crypto.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_crypto.cpp
+@@ -56,6 +56,11 @@ typedef struct {
+ 
+ bool protected_fs_file::generate_secure_blob(sgx_aes_gcm_128bit_key_t* key, const char* label, uint64_t physical_node_number, sgx_aes_gcm_128bit_tag_t* output)
+ {
++	if (integrity_only)
++	{
++		return true;
++	}
++
+ 	kdf_input_t buf = {0, "", 0, "", 0};
+ 
+ 	uint32_t len = (uint32_t)strnlen(label, MAX_LABEL_LEN + 1);
+@@ -67,19 +72,19 @@ bool protected_fs_file::generate_secure_blob(sgx_aes_gcm_128bit_key_t* key, cons
+ 
+ 	// index
+ 	// SP800-108:
+-	// i – A counter, a binary string of length r that is an input to each iteration of a PRF in counter mode [...].
++	// i ? A counter, a binary string of length r that is an input to each iteration of a PRF in counter mode [...].
+ 	buf.index = 0x01;
+ 
+ 	// label
+ 	// SP800-108:
+-	// Label – A string that identifies the purpose for the derived keying material, which is encoded as a binary string. 
++	// Label ? A string that identifies the purpose for the derived keying material, which is encoded as a binary string.
+ 	//         The encoding method for the Label is defined in a larger context, for example, in the protocol that uses a KDF.
+ 	strncpy(buf.label, label, len);
+ 
+ 	// context and nonce
+-	// SP800-108: 
+-	// Context – A binary string containing the information related to the derived keying material.
+-	//           It may include identities of parties who are deriving and / or using the derived keying material and, 
++	// SP800-108:
++	// Context ? A binary string containing the information related to the derived keying material.
++	//           It may include identities of parties who are deriving and / or using the derived keying material and,
+ 	//           optionally, a nonce known by the parties who derive the keys.
+ 	buf.node_number = physical_node_number;
+ 
+@@ -108,24 +113,29 @@ bool protected_fs_file::generate_secure_blob(sgx_aes_gcm_128bit_key_t* key, cons
+ 
+ bool protected_fs_file::generate_secure_blob_from_user_kdk(bool restore)
+ {
++	if (integrity_only)
++	{
++		return true;
++	}
++
+ 	kdf_input_t buf = {0, "", 0, "", 0};
+ 	sgx_status_t status = SGX_SUCCESS;
+ 
+ 	// index
+ 	// SP800-108:
+-	// i – A counter, a binary string of length r that is an input to each iteration of a PRF in counter mode [...].
++	// i ? A counter, a binary string of length r that is an input to each iteration of a PRF in counter mode [...].
+ 	buf.index = 0x01;
+ 
+ 	// label
+ 	// SP800-108:
+-	// Label – A string that identifies the purpose for the derived keying material, which is encoded as a binary string. 
++	// Label ? A string that identifies the purpose for the derived keying material, which is encoded as a binary string.
+ 	//         The encoding method for the Label is defined in a larger context, for example, in the protocol that uses a KDF.
+ 	strncpy(buf.label, METADATA_KEY_NAME, strlen(METADATA_KEY_NAME));
+ 
+ 	// context and nonce
+-	// SP800-108: 
+-	// Context – A binary string containing the information related to the derived keying material.
+-	//           It may include identities of parties who are deriving and / or using the derived keying material and, 
++	// SP800-108:
++	// Context ? A binary string containing the information related to the derived keying material.
++	//           It may include identities of parties who are deriving and / or using the derived keying material and,
+ 	//           optionally, a nonce known by the parties who derive the keys.
+ 	buf.node_number = 0;
+ 
+@@ -143,7 +153,7 @@ bool protected_fs_file::generate_secure_blob_from_user_kdk(bool restore)
+ 	{
+ 		memcpy(&buf.nonce32, &file_meta_data.plain_part.meta_data_key_id, sizeof(sgx_key_id_t));
+ 	}
+-	
++
+ 
+ 	// length of output (128 bits)
+ 	buf.output_len = 0x80;
+@@ -168,8 +178,13 @@ bool protected_fs_file::generate_secure_blob_from_user_kdk(bool restore)
+ 
+ bool protected_fs_file::init_session_master_key()
+ {
++	if (integrity_only)
++	{
++		return true;
++	}
++
+ 	sgx_aes_gcm_128bit_key_t empty_key = {0};
+-		
++
+ 	if (generate_secure_blob(&empty_key, MASTER_KEY_NAME, 0, (sgx_aes_gcm_128bit_tag_t*)&session_master_key) == false)
+ 		return false;
+ 
+@@ -181,6 +196,11 @@ bool protected_fs_file::init_session_master_key()
+ 
+ bool protected_fs_file::derive_random_node_key(uint64_t physical_node_number)
+ {
++	if (integrity_only)
++	{
++		return true;
++	}
++
+ 	if (master_key_count++ > MAX_MASTER_KEY_USAGES)
+ 	{
+ 		if (init_session_master_key() == false)
+@@ -196,15 +216,20 @@ bool protected_fs_file::derive_random_node_key(uint64_t physical_node_number)
+ 
+ bool protected_fs_file::generate_random_meta_data_key()
+ {
++	if (integrity_only)
++	{
++		return true;
++	}
++
+ 	if (use_user_kdk_key == 1)
+ 	{
+ 		return generate_secure_blob_from_user_kdk(false);
+ 	}
+ 
+-	// derive a random key from the enclave sealing key	
++	// derive a random key from the enclave sealing key
+ 	sgx_key_request_t key_request;
+-	memset(&key_request, 0, sizeof(sgx_key_request_t)); 
+-		
++	memset(&key_request, 0, sizeof(sgx_key_request_t));
++
+ 	key_request.key_name = SGX_KEYSELECT_SEAL;
+ 	key_request.key_policy = SGX_KEYPOLICY_MRSIGNER;
+ 
+@@ -215,14 +240,14 @@ bool protected_fs_file::generate_random_meta_data_key()
+     key_request.attribute_mask.xfrm = 0x0;
+ 
+ 	key_request.misc_mask = TSEAL_DEFAULT_MISCMASK;
+-		
++
+ 	sgx_status_t status = sgx_read_rand((unsigned char*)&key_request.key_id, sizeof(sgx_key_id_t));
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+ 		return false;
+ 	}
+-	
++
+ 	status = sgx_get_key(&key_request, &cur_key);
+ 	if (status != SGX_SUCCESS)
+ 	{
+@@ -241,8 +266,13 @@ bool protected_fs_file::generate_random_meta_data_key()
+ 
+ bool protected_fs_file::restore_current_meta_data_key(const sgx_aes_gcm_128bit_key_t* import_key)
+ {
++	if (integrity_only)
++	{
++		return true;
++	}
++
+ 	if (import_key != NULL)
+-	{		
++	{
+ 		memcpy(&cur_key, import_key, sizeof(sgx_aes_gcm_128bit_key_t));
+ 		return true;
+ 	}
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_flush.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_flush.cpp
+index be43c51..819da9f 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_flush.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_flush.cpp
+@@ -55,7 +55,7 @@ bool protected_fs_file::flush(/*bool mc*/)
+ 		sgx_thread_mutex_unlock(&mutex);
+ 		return false;
+ 	}
+-	
++
+ 	result = internal_flush(/*mc,*/ true);
+ 	if (result == false)
+ 	{
+@@ -259,7 +259,7 @@ bool protected_fs_file::set_update_flag(bool flush_to_disk)
+ 	file_meta_data.plain_part.update_flag = 0; // turn it off in memory. at the end of the flush, when we'll write the meta-data to disk, this flag will also be cleared there.
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+-		last_error = (status != SGX_SUCCESS) ? status : 
++		last_error = (status != SGX_SUCCESS) ? status :
+ 					 (result32 != -1) ? result32 : EIO;
+ 		return false;
+ 	}
+@@ -327,8 +327,16 @@ bool protected_fs_file::update_all_data_and_mht_nodes()
+ 				gcm_crypto_data_t* gcm_crypto_data = &data_node->parent->plain.data_nodes_crypto[data_node->data_node_number % ATTACHED_DATA_NODES_COUNT];
+ 
+ 				// encrypt the data, this also saves the gmac of the operation in the mht crypto node
+-				status = sgx_rijndael128GCM_encrypt(&cur_key, data_node->plain.data, NODE_SIZE, data_node->encrypted.cipher, 
+-													empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++				if(!integrity_only) {
++						status = sgx_rijndael128GCM_encrypt(&cur_key, data_node->plain.data, NODE_SIZE, data_node->encrypted.cipher,
++															empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++				}
++				// calculate the MAC only
++				else {
++						status = sgx_rijndael128GCM_encrypt(&cur_key, NULL, 0, NULL,
++															empty_iv, SGX_AESGCM_IV_SIZE, data_node->plain.data, NODE_SIZE, &gcm_crypto_data->gmac);
++						memcpy(data_node->encrypted.cipher, data_node->plain.data, NODE_SIZE);
++				}
+ 				if (status != SGX_SUCCESS)
+ 				{
+ 					last_error = status;
+@@ -380,9 +388,15 @@ bool protected_fs_file::update_all_data_and_mht_nodes()
+ 			mht_list.clear();
+ 			return false;
+ 		}
+-
+-		status = sgx_rijndael128GCM_encrypt(&cur_key, (const uint8_t*)&file_mht_node->plain, NODE_SIZE, file_mht_node->encrypted.cipher, 
+-											empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++		if(!integrity_only) {
++			status = sgx_rijndael128GCM_encrypt(&cur_key, (const uint8_t*)&file_mht_node->plain, NODE_SIZE, file_mht_node->encrypted.cipher,
++												empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++		}
++		else {
++			status = sgx_rijndael128GCM_encrypt(&cur_key, NULL ,0, NULL,
++												empty_iv, SGX_AESGCM_IV_SIZE, (const uint8_t*)&file_mht_node->plain, NODE_SIZE, &gcm_crypto_data->gmac);
++			memcpy(file_mht_node->encrypted.cipher, (const uint8_t*)&file_mht_node->plain, NODE_SIZE);
++		}
+ 		if (status != SGX_SUCCESS)
+ 		{
+ 			mht_list.clear();
+@@ -399,8 +413,15 @@ bool protected_fs_file::update_all_data_and_mht_nodes()
+ 	if (derive_random_node_key(root_mht.physical_node_number) == false)
+ 		return false;
+ 
+-	status = sgx_rijndael128GCM_encrypt(&cur_key, (const uint8_t*)&root_mht.plain, NODE_SIZE, root_mht.encrypted.cipher, 
+-										empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &encrypted_part_plain.mht_gmac);
++	if(!integrity_only) {
++		status = sgx_rijndael128GCM_encrypt(&cur_key, (const uint8_t*)&root_mht.plain, NODE_SIZE, root_mht.encrypted.cipher,
++											empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &encrypted_part_plain.mht_gmac);
++	}
++	else {
++		status = sgx_rijndael128GCM_encrypt(&cur_key, NULL, 0, NULL,
++											empty_iv, SGX_AESGCM_IV_SIZE, (const uint8_t*)&root_mht.plain, NODE_SIZE, &encrypted_part_plain.mht_gmac);
++		memcpy(root_mht.encrypted.cipher, (const uint8_t*)&root_mht.plain, NODE_SIZE);
++	}
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -416,20 +437,31 @@ bool protected_fs_file::update_all_data_and_mht_nodes()
+ bool protected_fs_file::update_meta_data_node()
+ {
+ 	sgx_status_t status;
+-	
++
+ 	// randomize a new key, saves the key _id_ in the meta data plain part
+ 	if (generate_random_meta_data_key() != true)
+ 	{
+ 		// last error already set
+ 		return false;
+ 	}
+-		
+-	// encrypt meta data encrypted part, also updates the gmac in the meta data plain part
+-	status = sgx_rijndael128GCM_encrypt(&cur_key, 
+-										(const uint8_t*)&encrypted_part_plain, sizeof(meta_data_encrypted_t), (uint8_t*)&file_meta_data.encrypted_part, 
+-										empty_iv, SGX_AESGCM_IV_SIZE, 
+-										NULL, 0, 
+-										&file_meta_data.plain_part.meta_data_gmac);
++
++	if (!integrity_only) {
++		// encrypt meta data encrypted part, also updates the gmac in the meta data plain part
++		status = sgx_rijndael128GCM_encrypt(&cur_key,
++					(const uint8_t*)&encrypted_part_plain, sizeof(meta_data_encrypted_t), (uint8_t*)&file_meta_data.encrypted_part,
++					empty_iv, SGX_AESGCM_IV_SIZE,
++					NULL, 0,
++					&file_meta_data.plain_part.meta_data_gmac);
++	}
++	else {
++		status = sgx_rijndael128GCM_encrypt(&cur_key,
++					NULL, 0, NULL,
++					empty_iv, SGX_AESGCM_IV_SIZE,
++					(const uint8_t*)&encrypted_part_plain, sizeof(meta_data_encrypted_t),
++					&file_meta_data.plain_part.meta_data_gmac);
++		memcpy((uint8_t*)&file_meta_data.encrypted_part, (const uint8_t*)&encrypted_part_plain, sizeof(meta_data_encrypted_t));
++	}
++
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -482,7 +514,7 @@ bool protected_fs_file::write_all_changes_to_disk(bool flush_to_disk)
+ 			status = u_sgxprotectedfs_fwrite_node(&result32, file, node_number, data_to_write, NODE_SIZE);
+ 			if (status != SGX_SUCCESS || result32 != 0)
+ 			{
+-				last_error = (status != SGX_SUCCESS) ? status : 
++				last_error = (status != SGX_SUCCESS) ? status :
+ 							 (result32 != -1) ? result32 : EIO;
+ 				return false;
+ 			}
+@@ -504,7 +536,7 @@ bool protected_fs_file::write_all_changes_to_disk(bool flush_to_disk)
+ 		status = u_sgxprotectedfs_fwrite_node(&result32, file, 1, (uint8_t*)&root_mht.encrypted, NODE_SIZE);
+ 		if (status != SGX_SUCCESS || result32 != 0)
+ 		{
+-			last_error = (status != SGX_SUCCESS) ? status : 
++			last_error = (status != SGX_SUCCESS) ? status :
+ 						 (result32 != -1) ? result32 : EIO;
+ 			return false;
+ 		}
+@@ -515,7 +547,7 @@ bool protected_fs_file::write_all_changes_to_disk(bool flush_to_disk)
+ 	status = u_sgxprotectedfs_fwrite_node(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+-		last_error = (status != SGX_SUCCESS) ? status : 
++		last_error = (status != SGX_SUCCESS) ? status :
+ 					 (result32 != -1) ? result32 : EIO;
+ 		return false;
+ 	}
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_init.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_init.cpp
+index 9e9f473..f292fea 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_init.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_init.cpp
+@@ -67,15 +67,15 @@ bool protected_fs_file::cleanup_filename(const char* src, char* dest)
+ }
+ 
+ 
+-protected_fs_file::protected_fs_file(const char* filename, const char* mode, const sgx_aes_gcm_128bit_key_t* import_key, const sgx_aes_gcm_128bit_key_t* kdk_key)
++protected_fs_file::protected_fs_file(const char* filename, const char* mode, const sgx_aes_gcm_128bit_key_t* import_key, const sgx_aes_gcm_128bit_key_t* kdk_key, bool _integrity_only)
+ {
+ 	sgx_status_t status = SGX_SUCCESS;
+ 	uint8_t result = 0;
+ 	int32_t result32 = 0;
+-	
++
+ 	init_fields();
+ 
+-	if (filename == NULL || mode == NULL || 
++	if (filename == NULL || mode == NULL ||
+ 		strnlen(filename, 1) == 0 || strnlen(mode, 1) == 0)
+ 	{
+ 		last_error = EINVAL;
+@@ -108,7 +108,7 @@ protected_fs_file::protected_fs_file(const char* filename, const char* mode, con
+ 		return;
+ 	}
+ 
+-	if (init_session_master_key() == false) 
++	if (init_session_master_key() == false)
+ 		// last_error already set
+ 		return;
+ 
+@@ -116,16 +116,16 @@ protected_fs_file::protected_fs_file(const char* filename, const char* mode, con
+ 	{
+ 		// for new file, this value will later be saved in the meta data plain part (init_new_file)
+ 		// for existing file, we will later compare this value with the value from the file (init_existing_file)
+-		use_user_kdk_key = 1; 
++		use_user_kdk_key = 1;
+ 		memcpy(user_kdk_key, kdk_key, sizeof(sgx_aes_gcm_128bit_key_t));
+ 	}
+-	
++
+ 	// get the clean file name (original name might be clean or with relative path or with absolute path...)
+ 	char clean_filename[FILENAME_MAX_LEN];
+ 	if (cleanup_filename(filename, clean_filename) == false)
+ 		// last_error already set
+ 		return;
+-	
++
+ 	if (import_key != NULL)
+ 	{// verify the key is not empty - note from SAFE review
+ 		sgx_aes_gcm_128bit_key_t empty_aes_key = {0};
+@@ -183,6 +183,8 @@ protected_fs_file::protected_fs_file(const char* filename, const char* mode, con
+ 		return;
+ 	}
+ 
++	integrity_only = _integrity_only;
++
+ 	// now open the file
+ 	read_only = (open_mode.read == 1 && open_mode.update == 0); // read only files can be opened simultaneously by many enclaves
+ 
+@@ -206,7 +208,7 @@ protected_fs_file::protected_fs_file(const char* filename, const char* mode, con
+ 			last_error = SGX_ERROR_FILE_NOT_SGX_FILE;
+ 			break;
+ 		}
+-		
++
+ 		strncpy(recovery_filename, filename, FULLNAME_MAX_LEN - 1); // copy full file name
+ 		recovery_filename[FULLNAME_MAX_LEN - 1] = '\0'; // just to be safe
+ 		size_t full_name_len = strnlen(recovery_filename, RECOVERY_FILE_MAX_LEN);
+@@ -222,7 +224,7 @@ protected_fs_file::protected_fs_file(const char* filename, const char* mode, con
+ 
+ 			if (init_existing_file(filename, clean_filename, import_key) == false)
+ 				break;
+-				
++
+ 			if (open_mode.append == 1 && open_mode.update == 0)
+ 				offset = encrypted_part_plain.size;
+ 		}
+@@ -252,6 +254,7 @@ void protected_fs_file::init_fields()
+ 	meta_data_node_number = 0;
+ 	memset(&file_meta_data, 0, sizeof(meta_data_node_t));
+ 	memset(&encrypted_part_plain, 0, sizeof(meta_data_encrypted_t));
++	memset(&cur_key, 0, sizeof(sgx_aes_gcm_128bit_key_t));
+ 
+ 	memset(&empty_iv, 0, sizeof(sgx_iv_t));
+ 
+@@ -261,21 +264,22 @@ void protected_fs_file::init_fields()
+ 	root_mht.mht_node_number = 0;
+ 	root_mht.new_node = true;
+ 	root_mht.need_writing = false;
+-	
++
+ 	offset = 0;
+ 	file = NULL;
+ 	end_of_file = false;
++	integrity_only = false;
+ 	need_writing = false;
+ 	read_only = 0;
+ 	file_status = SGX_FILE_STATUS_NOT_INITIALIZED;
+ 	last_error = SGX_SUCCESS;
+-	real_file_size = 0;	
++	real_file_size = 0;
+ 	open_mode.raw = 0;
+ 	use_user_kdk_key = 0;
+ 	master_key_count = 0;
+ 
+ 	recovery_filename[0] = '\0';
+-	
++
+ 	memset(&mutex, 0, sizeof(sgx_thread_mutex_t));
+ 
+ 	// set hash size to fit MAX_PAGES_IN_CACHE
+@@ -343,7 +347,7 @@ bool protected_fs_file::file_recovery(const char* filename)
+ 	status = u_sgxprotectedfs_fclose(&result32, file);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+-		last_error = (status != SGX_SUCCESS) ? status : 
++		last_error = (status != SGX_SUCCESS) ? status :
+ 					 (result32 != -1) ? result32 : EINVAL;
+ 		return false;
+ 	}
+@@ -361,7 +365,7 @@ bool protected_fs_file::file_recovery(const char* filename)
+ 	status = u_sgxprotectedfs_exclusive_file_open(&file, filename, read_only, &new_file_size, &result32);
+ 	if (status != SGX_SUCCESS || file == NULL)
+ 	{
+-		last_error = (status != SGX_SUCCESS) ? status : 
++		last_error = (status != SGX_SUCCESS) ? status :
+ 					 (result32 != 0) ? result32 : EACCES;
+ 		return false;
+ 	}
+@@ -376,7 +380,7 @@ bool protected_fs_file::file_recovery(const char* filename)
+ 	status = u_sgxprotectedfs_fread_node(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+-		last_error = (status != SGX_SUCCESS) ? status : 
++		last_error = (status != SGX_SUCCESS) ? status :
+ 					 (result32 != -1) ? result32 : EIO;
+ 		return false;
+ 	}
+@@ -394,7 +398,7 @@ bool protected_fs_file::init_existing_file(const char* filename, const char* cle
+ 	status = u_sgxprotectedfs_fread_node(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+-		last_error = (status != SGX_SUCCESS) ? status : 
++		last_error = (status != SGX_SUCCESS) ? status :
+ 					 (result32 != -1) ? result32 : EIO;
+ 		return false;
+ 	}
+@@ -439,15 +443,31 @@ bool protected_fs_file::init_existing_file(const char* filename, const char* cle
+ 		return false;
+ 	}
+ 
++	if (file_meta_data.plain_part.integrity_only != integrity_only)
++	{
++		last_error = EINVAL;
++		return false;
++	}
++
+ 	if (restore_current_meta_data_key(import_key) == false)
+ 		return false;
+ 
+-	// decrypt the encrypted part of the meta-data
+-	status = sgx_rijndael128GCM_decrypt(&cur_key, 
+-										(const uint8_t*)file_meta_data.encrypted_part, sizeof(meta_data_encrypted_blob_t), (uint8_t*)&encrypted_part_plain,
+-										empty_iv, SGX_AESGCM_IV_SIZE,
+-										NULL, 0,
+-										&file_meta_data.plain_part.meta_data_gmac);
++	if(!integrity_only) {
++		// decrypt the encrypted part of the meta-data
++		status = sgx_rijndael128GCM_decrypt(&cur_key,
++											(const uint8_t*)file_meta_data.encrypted_part, sizeof(meta_data_encrypted_blob_t), (uint8_t*)&encrypted_part_plain,
++											empty_iv, SGX_AESGCM_IV_SIZE,
++											NULL, 0,
++											&file_meta_data.plain_part.meta_data_gmac);
++	}
++	else {
++		status = sgx_rijndael128GCM_decrypt(&cur_key,
++											NULL, 0, NULL,
++											empty_iv, SGX_AESGCM_IV_SIZE,
++											(const uint8_t*)file_meta_data.encrypted_part, sizeof(meta_data_encrypted_blob_t),
++											&file_meta_data.plain_part.meta_data_gmac);
++		memcpy((uint8_t*)&encrypted_part_plain, (const uint8_t*)file_meta_data.encrypted_part, sizeof(meta_data_encrypted_blob_t));
++	}
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -511,15 +531,24 @@ bool protected_fs_file::init_existing_file(const char* filename, const char* cle
+ 		status = u_sgxprotectedfs_fread_node(&result32, file, 1, root_mht.encrypted.cipher, NODE_SIZE);
+ 		if (status != SGX_SUCCESS || result32 != 0)
+ 		{
+-			last_error = (status != SGX_SUCCESS) ? status : 
++			last_error = (status != SGX_SUCCESS) ? status :
+ 						 (result32 != -1) ? result32 : EIO;
+ 			return false;
+ 		}
+ 
+-		// this also verifies the root mht gmac against the gmac in the meta-data encrypted part
+-		status = sgx_rijndael128GCM_decrypt(&encrypted_part_plain.mht_key, 
+-											root_mht.encrypted.cipher, NODE_SIZE, (uint8_t*)&root_mht.plain, 
+-											empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &encrypted_part_plain.mht_gmac);
++		if(!integrity_only){
++			// this also verifies the root mht gmac against the gmac in the meta-data encrypted part
++			status = sgx_rijndael128GCM_decrypt(&encrypted_part_plain.mht_key,
++											    root_mht.encrypted.cipher, NODE_SIZE, (uint8_t*)&root_mht.plain,
++											    empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &encrypted_part_plain.mht_gmac);
++		}
++		else {
++			status = sgx_rijndael128GCM_decrypt(&encrypted_part_plain.mht_key,
++											    NULL, 0, NULL,
++											    empty_iv, SGX_AESGCM_IV_SIZE, root_mht.encrypted.cipher, NODE_SIZE, &encrypted_part_plain.mht_gmac);
++		memcpy((uint8_t*)&root_mht.plain, root_mht.encrypted.cipher, NODE_SIZE);
++		}
++
+ 		if (status != SGX_SUCCESS)
+ 		{
+ 			last_error = status;
+@@ -540,9 +569,10 @@ bool protected_fs_file::init_new_file(const char* clean_filename)
+ 	file_meta_data.plain_part.minor_version = SGX_FILE_MINOR_VERSION;
+ 
+ 	file_meta_data.plain_part.use_user_kdk_key = use_user_kdk_key;
++	file_meta_data.plain_part.integrity_only = integrity_only;
+ 
+ 	strncpy(encrypted_part_plain.clean_filename, clean_filename, FILENAME_MAX_LEN);
+-	
++
+ 	need_writing = true;
+ 
+ 	return true;
+@@ -552,7 +582,7 @@ bool protected_fs_file::init_new_file(const char* clean_filename)
+ protected_fs_file::~protected_fs_file()
+ {
+ 	void* data;
+-	
++
+ 	while ((data = cache.get_last()) != NULL)
+ 	{
+ 		if (((file_data_node_t*)data)->type == FILE_DATA_NODE_TYPE) // type is in the same offset in both node types, need to scrub the plaintext
+@@ -573,7 +603,7 @@ protected_fs_file::~protected_fs_file()
+ 	// scrub the last encryption key and the session key
+ 	memset_s(&cur_key, sizeof(sgx_aes_gcm_128bit_key_t), 0, sizeof(sgx_aes_gcm_128bit_key_t));
+ 	memset_s(&session_master_key, sizeof(sgx_aes_gcm_128bit_key_t), 0, sizeof(sgx_aes_gcm_128bit_key_t));
+-	
++
+ 	// scrub first 3KB of user data and the gmac_key
+ 	memset_s(&encrypted_part_plain, sizeof(meta_data_encrypted_t), 0, sizeof(meta_data_encrypted_t));
+ 
+@@ -616,7 +646,7 @@ bool protected_fs_file::pre_close(sgx_key_128bit_t* key, bool import)
+ 		status = u_sgxprotectedfs_fclose(&result32, file);
+ 		if (status != SGX_SUCCESS || result32 != 0)
+ 		{
+-			last_error = (status != SGX_SUCCESS) ? status : 
++			last_error = (status != SGX_SUCCESS) ? status :
+ 						 (result32 != -1) ? result32 : SGX_ERROR_FILE_CLOSE_FAILED;
+ 			retval = false;
+ 		}
+@@ -624,7 +654,7 @@ bool protected_fs_file::pre_close(sgx_key_128bit_t* key, bool import)
+ 		file = NULL;
+ 	}
+ 
+-	if (file_status == SGX_FILE_STATUS_OK && 
++	if (file_status == SGX_FILE_STATUS_OK &&
+ 		last_error == SGX_SUCCESS) // else...maybe something bad happened and the recovery file will be needed
+ 		erase_recovery_file();
+ 
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_other.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_other.cpp
+index 567175c..6d33625 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_other.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_other.cpp
+@@ -81,7 +81,7 @@ int32_t protected_fs_file::remove(const char* filename)
+ 
+ 		if (real_file_size == 0 || real_file_size % NODE_SIZE != 0)
+ 			break; // empty file or not an SGX protected FS file
+-		
++
+ 		// might be an SGX protected FS file
+ 		status = u_sgxprotectedfs_fread_node(&result32, file, 0, (uint8_t*)file_meta_data, NODE_SIZE);
+ 		if (status != SGX_SUCCESS || result32 != 0)
+@@ -89,22 +89,22 @@ int32_t protected_fs_file::remove(const char* filename)
+ 
+ 		if (file_meta_data->plain_part.major_version != SGX_FILE_MAJOR_VERSION)
+ 			break;
+-	
++
+ 		sgx_aes_gcm_128bit_key_t zero_key_id = {0};
+ 		sgx_aes_gcm_128bit_key_t key = {0};
+ 		if (consttime_memequal(&file_meta_data->plain_part.key_id, &zero_key_id, sizeof(sgx_aes_gcm_128bit_key_t)) == 1)
+ 			break; // shared file - no monotonic counter
+-		
++
+ 		sgx_key_request_t key_request = {0};
+ 		key_request.key_name = SGX_KEYSELECT_SEAL;
+ 		key_request.key_policy = SGX_KEYPOLICY_MRENCLAVE;
+ 		memcpy(&key_request.key_id, &file_meta_data->plain_part.key_id, sizeof(sgx_key_id_t));
+-		
++
+ 		status = sgx_get_key(&key_request, &key);
+ 		if (status != SGX_SUCCESS)
+-			break;		
++			break;
+ 
+-		status = sgx_rijndael128GCM_decrypt(&key, 
++		status = sgx_rijndael128GCM_decrypt(&key,
+ 											file_meta_data->encrypted_part, sizeof(meta_data_encrypted_blob_t),
+ 											(uint8_t*)encrypted_part_plain,
+ 											file_meta_data->plain_part.meta_data_iv, SGX_AESGCM_IV_SIZE,
+@@ -136,14 +136,14 @@ int32_t protected_fs_file::remove(const char* filename)
+ 		delete encrypted_part_plain;
+ 	}
+ 
+-	if (file != NULL) 
++	if (file != NULL)
+ 		u_sgxprotectedfs_fclose(&result32, file);
+ 
+ */
+-	
++
+ 	// do the actual file removal
+ 	status = u_sgxprotectedfs_remove(&result32, filename);
+-	if (status != SGX_SUCCESS) 
++	if (status != SGX_SUCCESS)
+ 	{
+ 		errno = status;
+ 		return 1;
+@@ -232,7 +232,7 @@ int protected_fs_file::seek(int64_t new_offset, int origin)
+ 		}
+ 		break;
+ 
+-	default: 
++	default:
+ 		break;
+ 	}
+ 
+@@ -309,7 +309,7 @@ void protected_fs_file::clear_error()
+ 		}
+ 	}
+ 
+-	if ((file_status == SGX_FILE_STATUS_MC_NOT_INCREMENTED) && 
++	if ((file_status == SGX_FILE_STATUS_MC_NOT_INCREMENTED) &&
+ 		(encrypted_part_plain.mc_value <= (UINT_MAX-2)))
+ 	{
+ 		uint32_t mc_value;
+@@ -325,7 +325,7 @@ void protected_fs_file::clear_error()
+ 		}
+ 	}
+ */
+-	
++
+ 	if (file_status == SGX_FILE_STATUS_OK)
+ 	{
+ 		last_error = SGX_SUCCESS;
+@@ -364,13 +364,13 @@ int32_t protected_fs_file::clear_cache()
+ 
+ 		assert(data != NULL);
+ 		assert(((file_data_node_t*)data)->need_writing == false); // need_writing is in the same offset in both node types
+-		// for production - 
++		// for production -
+ 		if (data == NULL || ((file_data_node_t*)data)->need_writing == true)
+ 		{
+ 			sgx_thread_mutex_unlock(&mutex);
+ 			return 1;
+ 		}
+-		
++
+ 		cache.remove_last();
+ 
+ 		// before deleting the memory, need to scrub the plain secrets
+@@ -393,3 +393,7 @@ int32_t protected_fs_file::clear_cache()
+ 	return 0;
+ }
+ 
++int32_t protected_fs_file::get_root_mac(sgx_aes_gcm_128bit_tag_t* mac) {
++    memcpy(mac, file_meta_data.plain_part.meta_data_gmac, sizeof(*mac));
++    return 0;
++}
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_read_write.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_read_write.cpp
+index 228108c..30dcb98 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_read_write.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_read_write.cpp
+@@ -110,7 +110,7 @@ size_t protected_fs_file::write(const void* ptr, size_t size, size_t count)
+ 			data_to_write += empty_place_left_in_md;
+ 			data_left_to_write -= empty_place_left_in_md;
+ 		}
+-		
++
+ 		if (offset > encrypted_part_plain.size)
+ 			encrypted_part_plain.size = offset; // file grew, update the new file size
+ 
+@@ -126,7 +126,7 @@ size_t protected_fs_file::write(const void* ptr, size_t size, size_t count)
+ 
+ 		size_t offset_in_node = (size_t)((offset - MD_USER_DATA_SIZE) % NODE_SIZE);
+ 		size_t empty_place_left_in_node = NODE_SIZE - offset_in_node;
+-		
++
+ 		if (data_left_to_write <= empty_place_left_in_node)
+ 		{ // this will be the last write
+ 			memcpy(&file_data_node->plain.data[offset_in_node], data_to_write, data_left_to_write);
+@@ -272,7 +272,7 @@ size_t protected_fs_file::read(void* ptr, size_t size, size_t count)
+ 
+ 		size_t offset_in_node = (offset - MD_USER_DATA_SIZE) % NODE_SIZE;
+ 		size_t data_left_in_node = NODE_SIZE - offset_in_node;
+-		
++
+ 		if (data_left_to_read <= data_left_in_node)
+ 		{
+ 			memcpy(out_buffer, &file_data_node->plain.data[offset_in_node], data_left_to_read);
+@@ -304,8 +304,8 @@ size_t protected_fs_file::read(void* ptr, size_t size, size_t count)
+ }
+ 
+ 
+-// this is a very 'specific' function, tied to the architecture of the file layout, returning the node numbers according to the offset in the file 
+-void get_node_numbers(uint64_t offset, uint64_t* mht_node_number, uint64_t* data_node_number, 
++// this is a very 'specific' function, tied to the architecture of the file layout, returning the node numbers according to the offset in the file
++void get_node_numbers(uint64_t offset, uint64_t* mht_node_number, uint64_t* data_node_number,
+ 					 uint64_t* physical_mht_node_number, uint64_t* physical_data_node_number)
+ {
+ 	// node 0 - meta data node
+@@ -348,7 +348,7 @@ file_data_node_t* protected_fs_file::get_data_node()
+ 		return NULL;
+ 	}
+ 
+-	if ((offset - MD_USER_DATA_SIZE) % NODE_SIZE == 0 && 
++	if ((offset - MD_USER_DATA_SIZE) % NODE_SIZE == 0 &&
+ 		offset == encrypted_part_plain.size)
+ 	{// new node
+ 		file_data_node = append_data_node();
+@@ -374,7 +374,7 @@ file_data_node_t* protected_fs_file::get_data_node()
+ 	{
+ 		void* data = cache.get_last();
+ 		assert(data != NULL);
+-		// for production - 
++		// for production -
+ 		if (data == NULL)
+ 		{
+ 			last_error = SGX_ERROR_UNEXPECTED;
+@@ -409,7 +409,7 @@ file_data_node_t* protected_fs_file::get_data_node()
+ 			}
+ 		}
+ 	}
+-	
++
+ 	return file_data_node;
+ }
+ 
+@@ -461,7 +461,7 @@ file_data_node_t* protected_fs_file::read_data_node()
+ 	file_data_node_t* file_data_node = (file_data_node_t*)cache.get(physical_node_number);
+ 	if (file_data_node != NULL)
+ 		return file_data_node;
+-	
++
+ 	// need to read the data node from the disk
+ 
+ 	file_mht_node = get_mht_node();
+@@ -481,20 +481,32 @@ file_data_node_t* protected_fs_file::read_data_node()
+ 	file_data_node->data_node_number = data_node_number;
+ 	file_data_node->physical_node_number = physical_node_number;
+ 	file_data_node->parent = file_mht_node;
+-		
++
+ 	status = u_sgxprotectedfs_fread_node(&result32, file, file_data_node->physical_node_number, file_data_node->encrypted.cipher, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		delete file_data_node;
+-		last_error = (status != SGX_SUCCESS) ? status : 
++		last_error = (status != SGX_SUCCESS) ? status :
+ 					 (result32 != -1) ? result32 : EIO;
+ 		return NULL;
+ 	}
+ 
+ 	gcm_crypto_data_t* gcm_crypto_data = &file_data_node->parent->plain.data_nodes_crypto[file_data_node->data_node_number % ATTACHED_DATA_NODES_COUNT];
+ 
+-	// this function decrypt the data _and_ checks the integrity of the data against the gmac
+-	status = sgx_rijndael128GCM_decrypt(&gcm_crypto_data->key, file_data_node->encrypted.cipher, NODE_SIZE, file_data_node->plain.data, empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++	if(!integrity_only) {
++		// this function decrypt the data _and_ checks the integrity of the data against the gmac
++		status = sgx_rijndael128GCM_decrypt(&gcm_crypto_data->key,
++											file_data_node->encrypted.cipher,
++											NODE_SIZE, file_data_node->plain.data,
++											empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++	}
++	else {
++		status = sgx_rijndael128GCM_decrypt(&gcm_crypto_data->key,
++											NULL, 0, NULL,
++											empty_iv, SGX_AESGCM_IV_SIZE,
++											file_data_node->encrypted.cipher, NODE_SIZE, &gcm_crypto_data->gmac);
++		memcpy(file_data_node->plain.data, file_data_node->encrypted.cipher, NODE_SIZE);
++	}
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		delete file_data_node;
+@@ -505,7 +517,7 @@ file_data_node_t* protected_fs_file::read_data_node()
+ 		}
+ 		return NULL;
+ 	}
+-		
++
+ 	if (cache.add(file_data_node->physical_node_number, file_data_node) == false)
+ 	{
+ 		memset_s(&file_data_node->plain, sizeof(data_node_t), 0, sizeof(data_node_t)); // scrub the plaintext data
+@@ -536,7 +548,7 @@ file_mht_node_t* protected_fs_file::get_mht_node()
+ 		return &root_mht;
+ 
+ 	// file is constructed from 128*4KB = 512KB per MHT node.
+-	if ((offset - MD_USER_DATA_SIZE) % (ATTACHED_DATA_NODES_COUNT * NODE_SIZE) == 0 && 
++	if ((offset - MD_USER_DATA_SIZE) % (ATTACHED_DATA_NODES_COUNT * NODE_SIZE) == 0 &&
+ 		 offset == encrypted_part_plain.size)
+ 	{
+ 		file_mht_node = append_mht_node(mht_node_number);
+@@ -582,7 +594,7 @@ file_mht_node_t* protected_fs_file::append_mht_node(uint64_t mht_node_number)
+ 		last_error = ENOMEM;
+ 		return NULL;
+ 	}
+-	
++
+ 	return new_file_mht_node;
+ }
+ 
+@@ -619,20 +631,32 @@ file_mht_node_t* protected_fs_file::read_mht_node(uint64_t mht_node_number)
+ 	file_mht_node->mht_node_number = mht_node_number;
+ 	file_mht_node->physical_node_number = physical_node_number;
+ 	file_mht_node->parent = parent_file_mht_node;
+-		
++
+ 	status = u_sgxprotectedfs_fread_node(&result32, file, file_mht_node->physical_node_number, file_mht_node->encrypted.cipher, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		delete file_mht_node;
+-		last_error = (status != SGX_SUCCESS) ? status : 
++		last_error = (status != SGX_SUCCESS) ? status :
+ 					 (result32 != -1) ? result32 : EIO;
+ 		return NULL;
+ 	}
+-	
++
+ 	gcm_crypto_data_t* gcm_crypto_data = &file_mht_node->parent->plain.mht_nodes_crypto[(file_mht_node->mht_node_number - 1) % CHILD_MHT_NODES_COUNT];
+ 
+-	// this function decrypt the data _and_ checks the integrity of the data against the gmac
+-	status = sgx_rijndael128GCM_decrypt(&gcm_crypto_data->key, file_mht_node->encrypted.cipher, NODE_SIZE, (uint8_t*)&file_mht_node->plain, empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++	if(!integrity_only){
++		// this function decrypt the data _and_ checks the integrity of the data against the gmac
++		status = sgx_rijndael128GCM_decrypt(&gcm_crypto_data->key,
++											file_mht_node->encrypted.cipher,
++											NODE_SIZE, (uint8_t*)&file_mht_node->plain,
++											empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++	}
++	else {
++		status = sgx_rijndael128GCM_decrypt(&gcm_crypto_data->key,
++											NULL, 0, NULL,
++											empty_iv, SGX_AESGCM_IV_SIZE,
++											file_mht_node->encrypted.cipher, NODE_SIZE, &gcm_crypto_data->gmac);
++		memcpy((uint8_t*)&file_mht_node->plain, file_mht_node->encrypted.cipher, NODE_SIZE);
++	}
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		delete file_mht_node;
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/protected_fs_file.h b/sdk/protected_fs/sgx_tprotected_fs/protected_fs_file.h
+index c03f7f2..5c1cdad 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/protected_fs_file.h
++++ b/sdk/protected_fs/sgx_tprotected_fs/protected_fs_file.h
+@@ -143,22 +143,22 @@ private:
+ 	};
+ 
+ 	meta_data_encrypted_t encrypted_part_plain; // encrypted part of meta data node, decrypted
+-	
++
+ 	file_mht_node_t root_mht; // the root of the mht is always needed (for files bigger than 3KB)
+ 
+ 	FILE* file; // OS's FILE pointer
+-	
++
+ 	open_mode_t open_mode;
+ 	uint8_t read_only;
+ 	int64_t offset; // current file position (user's view)
+ 	bool end_of_file; // flag
+ 
+ 	int64_t real_file_size;
+-	
++	bool integrity_only; // If true, no encryption, only MAC. Default: false.
+ 	bool need_writing; // flag
+ 	uint32_t last_error; // last operation error
+ 	protected_fs_status_e file_status;
+-	
++
+ 	sgx_thread_mutex_t mutex;
+ 
+ 	uint8_t use_user_kdk_key;
+@@ -167,7 +167,7 @@ private:
+ 	sgx_aes_gcm_128bit_key_t cur_key;
+ 	sgx_aes_gcm_128bit_key_t session_master_key;
+ 	uint32_t master_key_count;
+-	
++
+ 	char recovery_filename[RECOVERY_FILE_MAX_LEN]; // might include full path to the file
+ 
+ 	lru_cache cache;
+@@ -182,15 +182,15 @@ private:
+ 	bool file_recovery(const char* filename);
+ 	bool init_existing_file(const char* filename, const char* clean_filename, const sgx_aes_gcm_128bit_key_t* import_key);
+ 	bool init_new_file(const char* clean_filename);
+-	
++
+ 	bool generate_secure_blob(sgx_aes_gcm_128bit_key_t* key, const char* label, uint64_t physical_node_number, sgx_aes_gcm_128bit_tag_t* output);
+ 	bool generate_secure_blob_from_user_kdk(bool restore);
+ 	bool init_session_master_key();
+ 	bool derive_random_node_key(uint64_t physical_node_number);
+ 	bool generate_random_meta_data_key();
+ 	bool restore_current_meta_data_key(const sgx_aes_gcm_128bit_key_t* import_key);
+-	
+-	
++
++
+ 	file_data_node_t* get_data_node();
+ 	file_data_node_t* read_data_node();
+ 	file_data_node_t* append_data_node();
+@@ -207,7 +207,7 @@ private:
+ 	bool internal_flush(/*bool mc,*/ bool flush_to_disk);
+ 
+ public:
+-	protected_fs_file(const char* filename, const char* mode, const sgx_aes_gcm_128bit_key_t* import_key, const sgx_aes_gcm_128bit_key_t* kdk_key);
++	protected_fs_file(const char* filename, const char* mode, const sgx_aes_gcm_128bit_key_t* import_key, const sgx_aes_gcm_128bit_key_t* kdk_key, bool integrity_only);
+ 	~protected_fs_file();
+ 
+ 	size_t write(const void* ptr, size_t size, size_t count);
+@@ -220,6 +220,7 @@ public:
+ 	int32_t clear_cache();
+ 	bool flush(/*bool mc*/);
+ 	bool pre_close(sgx_key_128bit_t* key, bool import);
++	int32_t get_root_mac(sgx_aes_gcm_128bit_tag_t* root_mac);
+ 	static int32_t remove(const char* filename);
+ };
+ 
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/protected_fs_nodes.h b/sdk/protected_fs/sgx_tprotected_fs/protected_fs_nodes.h
+index cdc0044..d9237fc 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/protected_fs_nodes.h
++++ b/sdk/protected_fs/sgx_tprotected_fs/protected_fs_nodes.h
+@@ -68,8 +68,9 @@ typedef struct _meta_data_plain
+ 	sgx_attributes_t attribute_mask;
+ 
+ 	sgx_aes_gcm_128bit_tag_t meta_data_gmac;
+-	
++
+ 	uint8_t          update_flag;
++	uint8_t          integrity_only;
+ } meta_data_plain_t;
+ 
+ // these are all defined as relative to node size, so we can decrease node size in tests and have deeper tree
+@@ -81,7 +82,7 @@ typedef struct _meta_data_encrypted
+ {
+ 	char          clean_filename[FILENAME_MAX_LEN];
+ 	int64_t       size;
+-	
++
+ 	sgx_mc_uuid_t mc_uuid; // not used
+ 	uint32_t      mc_value; // not used
+ 
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs.cpp b/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs.cpp
+index a1554fe..8c2d55e 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs.cpp
+@@ -35,8 +35,7 @@
+ 
+ #include <errno.h>
+ 
+-
+-static SGX_FILE* sgx_fopen_internal(const char* filename, const char* mode, const sgx_key_128bit_t *auto_key, const sgx_key_128bit_t *kdk_key)
++static SGX_FILE* sgx_fopen_internal(const char* filename, const char* mode, const sgx_key_128bit_t *auto_key, const sgx_key_128bit_t *kdk_key, bool integrity_only)
+ {
+ 	protected_fs_file* file = NULL;
+ 
+@@ -47,7 +46,7 @@ static SGX_FILE* sgx_fopen_internal(const char* filename, const char* mode, cons
+ 	}
+ 
+ 	try {
+-		file = new protected_fs_file(filename, mode, auto_key, kdk_key);
++		file = new protected_fs_file(filename, mode, auto_key, kdk_key, integrity_only);
+ 	}
+ 	catch (std::bad_alloc& e) {
+ 		(void)e; // remove warning
+@@ -68,13 +67,18 @@ static SGX_FILE* sgx_fopen_internal(const char* filename, const char* mode, cons
+ 
+ SGX_FILE* sgx_fopen_auto_key(const char* filename, const char* mode)
+ {
+-	return sgx_fopen_internal(filename, mode, NULL, NULL);
++	return sgx_fopen_internal(filename, mode, NULL, NULL, false);
+ }
+ 
++SGX_FILE* sgx_fopen_integrity_only(const char* filename, const char* mode)
++{
++	sgx_key_128bit_t empty_key = {0};
++	return sgx_fopen_internal(filename, mode, NULL, &empty_key, true);
++}
+ 
+ SGX_FILE* sgx_fopen(const char* filename, const char* mode, const sgx_key_128bit_t *key)
+ {
+-	return sgx_fopen_internal(filename, mode, NULL, key);
++	return sgx_fopen_internal(filename, mode, NULL, key, false);
+ }
+ 
+ 
+@@ -172,7 +176,7 @@ int32_t sgx_feof(SGX_FILE* stream)
+ {
+ 	if (stream == NULL)
+ 		return -1;
+-	
++
+ 	protected_fs_file* file = (protected_fs_file*)stream;
+ 
+ 	return ((file->get_eof() == true) ? 1 : 0);
+@@ -222,7 +226,7 @@ int32_t sgx_remove(const char* filename)
+ 
+ int32_t sgx_fexport_auto_key(const char* filename, sgx_key_128bit_t *key)
+ {
+-	SGX_FILE* stream = sgx_fopen_internal(filename, "r", NULL, NULL);
++	SGX_FILE* stream = sgx_fopen_internal(filename, "r", NULL, NULL, false);
+ 	if (stream == NULL)
+ 		return 1;
+ 
+@@ -232,7 +236,7 @@ int32_t sgx_fexport_auto_key(const char* filename, sgx_key_128bit_t *key)
+ 
+ int32_t sgx_fimport_auto_key(const char* filename, const sgx_key_128bit_t *key)
+ {
+-	SGX_FILE* stream = sgx_fopen_internal(filename, "r+", key, NULL);
++	SGX_FILE* stream = sgx_fopen_internal(filename, "r+", key, NULL, false);
+ 	if (stream == NULL)
+ 		return 1;
+ 
+@@ -251,4 +255,14 @@ int32_t sgx_fclear_cache(SGX_FILE* stream)
+ }
+ 
+ 
++int32_t SGXAPI sgx_fget_mac(SGX_FILE* stream, sgx_aes_gcm_128bit_tag_t* mac)
++{
++	if (stream == NULL)
++		return 1;
+ 
++	protected_fs_file* file = (protected_fs_file*)stream;
++	if (file->flush() == false)
++		return 1;
++
++	return file->get_root_mac(mac);
++}
+diff --git a/sdk/protected_fs/sgx_uprotected_fs/sgx_uprotected_fs.cpp b/sdk/protected_fs/sgx_uprotected_fs/sgx_uprotected_fs.cpp
+index 2226ced..2de599f 100644
+--- a/sdk/protected_fs/sgx_uprotected_fs/sgx_uprotected_fs.cpp
++++ b/sdk/protected_fs/sgx_uprotected_fs/sgx_uprotected_fs.cpp
+@@ -58,7 +58,7 @@ void* u_sgxprotectedfs_exclusive_file_open(const char* filename, uint8_t read_on
+ 	int fd = -1;
+ 	mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
+ 	struct stat stat_st;
+-	
++
+ 	memset(&stat_st, 0, sizeof(struct stat));
+ 
+ 	if (filename == NULL || strnlen(filename, 1) == 0)
+@@ -99,7 +99,7 @@ void* u_sgxprotectedfs_exclusive_file_open(const char* filename, uint8_t read_on
+ 		assert(result == 0);
+ 		return NULL;
+ 	}
+-	
++
+ 	// convert the file handle to standard 'C' API file pointer
+ 	f = fdopen(fd, read_only ? "rb" : "r+b");
+ 	if (f == NULL)
+@@ -122,7 +122,7 @@ void* u_sgxprotectedfs_exclusive_file_open(const char* filename, uint8_t read_on
+ uint8_t u_sgxprotectedfs_check_if_file_exists(const char* filename)
+ {
+ 	struct stat stat_st;
+-	
++
+ 	memset(&stat_st, 0, sizeof(struct stat));
+ 
+ 	if (filename == NULL || strnlen(filename, 1) == 0)
+@@ -130,8 +130,8 @@ uint8_t u_sgxprotectedfs_check_if_file_exists(const char* filename)
+ 		DEBUG_PRINT("filename is NULL or empty\n");
+ 		return 1;
+ 	}
+-	
+-	return (stat(filename, &stat_st) == 0); 
++
++	return (stat(filename, &stat_st) == 0);
+ }
+ 
+ 
+@@ -247,7 +247,7 @@ int32_t u_sgxprotectedfs_fclose(void* f)
+ 		DEBUG_PRINT("fileno returned -1\n");
+ 	else
+ 		flock(fd, LOCK_UN);
+-	
++
+ 	if ((result = fclose(file)) != 0)
+ 	{
+ 		if (errno != 0)
+@@ -274,13 +274,13 @@ uint8_t u_sgxprotectedfs_fflush(void* f)
+ 		DEBUG_PRINT("file is NULL\n");
+ 		return 1;
+ 	}
+-	
++
+ 	if ((result = fflush(file)) != 0)
+ 	{
+ 		DEBUG_PRINT("fflush returned %d\n", result);
+ 		return 1;
+ 	}
+-	
++
+ 	return 0;
+ }
+ 
+@@ -302,7 +302,7 @@ int32_t u_sgxprotectedfs_remove(const char* filename)
+ 			return errno;
+ 		return -1;
+ 	}
+-	
++
+ 	return 0;
+ }
+ 
+@@ -317,7 +317,7 @@ void* u_sgxprotectedfs_recovery_file_open(const char* filename)
+ 		DEBUG_PRINT("recovery filename is NULL or empty\n");
+ 		return NULL;
+ 	}
+-	
++
+ 	for (int i = 0; i < MAX_FOPEN_RETRIES; i++)
+ 	{
+ 		f = fopen(filename, "wb");
+@@ -330,7 +330,7 @@ void* u_sgxprotectedfs_recovery_file_open(const char* filename)
+ 		DEBUG_PRINT("fopen (%s) returned NULL\n", filename);
+ 		return NULL;
+ 	}
+-	
++
+ 	return f;
+ }
+ 
+@@ -344,7 +344,7 @@ uint8_t u_sgxprotectedfs_fwrite_recovery_node(void* f, uint8_t* data, uint32_t d
+ 		DEBUG_PRINT("file is NULL\n");
+ 		return 1;
+ 	}
+-		
++
+ 	// recovery nodes are written sequentially
+ 	size_t count = fwrite(data, 1, data_length, file);
+ 	if (count != data_length)
+@@ -371,7 +371,7 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 	uint8_t* recovery_node = NULL;
+ 	uint32_t i = 0;
+ 
+-	do 
++	do
+ 	{
+ 		if (filename == NULL || strnlen(filename, 1) == 0)
+ 		{
+@@ -384,7 +384,7 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 			DEBUG_PRINT("recovery filename is NULL or empty\n");
+ 			return (int32_t)NULL;
+ 		}
+-	
++
+ 		recovery_file = fopen(recovery_filename, "rb");
+ 		if (recovery_file == NULL)
+ 		{
+@@ -402,7 +402,7 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 		}
+ 
+ 		file_size = ftello(recovery_file);
+-	
++
+ 		if ((result = fseeko(recovery_file, 0, SEEK_SET)) != 0)
+ 		{
+ 			DEBUG_PRINT("fseeko returned %d\n", result);
+@@ -445,7 +445,7 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 				err = ferror(recovery_file);
+ 				if (err != 0)
+ 					ret = err;
+-				else if (errno != 0) 
++				else if (errno != 0)
+ 					ret = errno;
+ 				break;
+ 			}
+@@ -466,7 +466,7 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 				err = ferror(source_file);
+ 				if (err != 0)
+ 					ret = err;
+-				else if (errno != 0) 
++				else if (errno != 0)
+ 					ret = errno;
+ 				break;
+ 			}
+@@ -503,6 +503,6 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 
+ 	if (ret == 0)
+ 		remove(recovery_filename);
+-	
++
+ 	return ret;
+ }
+diff --git a/sdk/tlibc/Makefile b/sdk/tlibc/Makefile
+index b019c86..c8d77b1 100644
+--- a/sdk/tlibc/Makefile
++++ b/sdk/tlibc/Makefile
+@@ -34,6 +34,7 @@ include ../../buildenv.mk
+ CFLAGS   += $(ENCLAVE_CFLAGS)
+ ASFLAGS  := $(CFLAGS)
+ CFLAGS   += -std=c99
++CFLAGS   += -DUSE_MALLOC_DEPRECATED # Required by Rust SGX SDK
+ CXXFLAGS += $(ENCLAVE_CXXFLAGS) -fno-exceptions -fno-rtti
+ 
+ CPPFLAGS += -I.                          \
+diff --git a/sdk/tlibthread/Makefile b/sdk/tlibthread/Makefile
+index 518af24..1d8e4ad 100755
+--- a/sdk/tlibthread/Makefile
++++ b/sdk/tlibthread/Makefile
+@@ -41,7 +41,8 @@ CPPFLAGS := -I$(COMMON_DIR)/inc/internal \
+ 
+ OBJ := sethread_mutex.o \
+        sethread_cond.o  \
+-       sethread_utils.o
++       sethread_utils.o \
++       sethread_self.o
+ 
+ LIBTLIBTHREAD := libtlibthread.a
+ 
+diff --git a/sdk/tlibthread/sethread_self.cpp b/sdk/tlibthread/sethread_self.cpp
+new file mode 100644
+index 0000000..165143a
+--- /dev/null
++++ b/sdk/tlibthread/sethread_self.cpp
+@@ -0,0 +1,39 @@
++/*
++ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ *   * Redistributions of source code must retain the above copyright
++ *     notice, this list of conditions and the following disclaimer.
++ *   * Redistributions in binary form must reproduce the above copyright
++ *     notice, this list of conditions and the following disclaimer in
++ *     the documentation and/or other materials provided with the
++ *     distribution.
++ *   * Neither the name of Intel Corporation nor the names of its
++ *     contributors may be used to endorse or promote products derived
++ *     from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ */
++
++#include "sethread_internal.h"
++#include "util.h"
++
++/* Occlum's notes: make TCS avaiable to Occlum */
++extern "C" const void* sgx_thread_get_self(void) {
++    sgx_thread_t self = (sgx_thread_t)get_thread_data();
++    return TD2TCS(self);
++}
+diff --git a/sdk/trts/init_enclave.cpp b/sdk/trts/init_enclave.cpp
+index 2a36184..cb84fbc 100644
+--- a/sdk/trts/init_enclave.cpp
++++ b/sdk/trts/init_enclave.cpp
+@@ -56,7 +56,7 @@ int EDMM_supported __attribute__((section(RELRO_SECTION_NAME))) = 0;
+ sdk_version_t g_sdk_version __attribute__((section(RELRO_SECTION_NAME))) = SDK_VERSION_1_5;
+ 
+ const volatile global_data_t g_global_data __attribute__((section(".niprod"))) = {1, 2, 3, 4,
+-   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0, 0, 0, 0, 0, 0}, 0}, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, {{{0, 0, 0, 0, 0, 0, 0}}}};
++   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0, 0, 0, 0, 0, 0}, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, {{{0, 0, 0, 0, 0, 0, 0}}}};
+ uint32_t g_enclave_state __attribute__((section(".nipd"))) = ENCLAVE_INIT_NOT_STARTED;
+ 
+ extern "C" {
+diff --git a/sdk/trts/linux/trts_pic.S b/sdk/trts/linux/trts_pic.S
+index 1957d0d..d2ce3df 100644
+--- a/sdk/trts/linux/trts_pic.S
++++ b/sdk/trts/linux/trts_pic.S
+@@ -291,6 +291,14 @@ DECLARE_LOCAL_FUNC do_ocall
+ 
+     sub     $(20*SE_WORDSIZE), %xsp    /* 20 slots for GPRs and other info */
+     mov     %xcx, SE_WORDSIZE*19(%xsp) /* addr for xsave */
++
++    /* Occlum's notes: save fsbase
++     * The location that we use to save fsbase is the reserved fields of
++     * struct ocall_context_t. Make sure the location remains unused by
++     * future versions of Intel SGX SDK. */
++    rdfsbase %xcx
++    mov     %xcx, SE_WORDSIZE*15(%xsp)
++
+ /* save non-volatile registers, except xsp */
+     mov     %xbx, SE_WORDSIZE*14(%xsp)
+     mov     %xsi, SE_WORDSIZE*13(%xsp)
+@@ -456,6 +464,10 @@ DECLARE_GLOBAL_FUNC asm_oret
+     mov    13*SE_WORDSIZE(%xsp), %xsi
+     mov    14*SE_WORDSIZE(%xsp), %xbx
+ 
++    /* Occlum's notes: restore fsbase */
++    mov    15*SE_WORDSIZE(%xsp), %xcx
++    wrfsbase %xcx
++
+     mov     %xbp, %xsp
+     pop     %xbp
+ 
+diff --git a/sdk/trts/trts_ecall.cpp b/sdk/trts/trts_ecall.cpp
+index 8ee0816..1c35b10 100644
+--- a/sdk/trts/trts_ecall.cpp
++++ b/sdk/trts/trts_ecall.cpp
+@@ -318,6 +318,9 @@ sgx_status_t do_init_thread(void *tcs, bool enclave_init)
+     thread_data->stack_base_addr -= (size_t)STATIC_STACK_SIZE;
+     thread_data->stack_guard = stack_guard;
+     thread_data->flags = thread_flags;
++    thread_data->user_stack_is_enabled = 0;
++    thread_data->user_stack_base_addr = 0;
++    thread_data->user_stack_limit_addr = 0;
+     init_static_stack_canary(tcs);
+ 
+     if (enclave_init)
+diff --git a/sdk/trts/trts_util.cpp b/sdk/trts/trts_util.cpp
+index 0c117a0..3ccdf90 100644
+--- a/sdk/trts/trts_util.cpp
++++ b/sdk/trts/trts_util.cpp
+@@ -30,6 +30,7 @@
+  */
+ 
+ 
++#include "sgx_trts.h"
+ #include "trts_util.h"
+ #include "global_data.h"
+ #include "util.h"
+@@ -114,7 +115,7 @@ int feature_supported(const uint64_t *feature_set, uint32_t feature_shift)
+         return 0;
+ }
+ 
+-bool is_stack_addr(void *address, size_t size)
++bool is_sdk_stack_addr(void *address, size_t size)
+ {
+     thread_data_t *thread_data = get_thread_data();
+     size_t stack_base = thread_data->stack_base_addr;
+@@ -123,9 +124,53 @@ bool is_stack_addr(void *address, size_t size)
+     return (addr <= (addr + size)) && (stack_base >= (addr + size)) && (stack_limit <= addr);
+ }
+ 
+-bool is_valid_sp(uintptr_t sp)
++bool is_valid_sdk_sp(uintptr_t sp)
+ {
+     return ( !(sp & (sizeof(uintptr_t) - 1))   // sp is expected to be 4/8 bytes aligned
+-           && is_stack_addr((void*)sp, 0) );   // sp points to the top/bottom of stack are accepted
++           && is_sdk_stack_addr((void*)sp, 0) );   // sp points to the top/bottom of stack are accepted
+ }
+ 
++bool is_user_stack_addr(void *address, size_t size)
++{
++    thread_data_t *thread_data = get_thread_data();
++    if (!thread_data->user_stack_is_enabled) return false;
++
++    size_t stack_base = thread_data->user_stack_base_addr;
++    size_t stack_limit  = thread_data->user_stack_limit_addr;
++    size_t addr = (size_t) address;
++    return (addr <= (addr + size)) && (stack_base >= (addr + size)) && (stack_limit <= addr);
++}
++
++bool is_valid_user_sp(uintptr_t sp)
++{
++    return ( !(sp & (sizeof(uintptr_t) - 1))       // sp is expected to be 4/8 bytes aligned
++           && is_user_stack_addr((void*)sp, 0) );  // sp points to the top/bottom of stack are accepted
++}
++
++// Compiler barriers are inserted so that the memory orderings are
++// preserved in case of any exceptions. This ensures that even if an
++// exception occurs right in middle of updating stack base and limit (see
++// the two functions below), the enclave exception handler can still use
++// is_user_stack_addr function properly.
++#define COMPILER_BARRIER        { asm volatile("" ::: "memory"); }
++
++int sgx_enable_user_stack(size_t stack_base, size_t stack_limit) {
++    if (stack_base <= stack_limit) return SGX_ERROR_INVALID_PARAMETER;
++
++    thread_data_t *thread_data = get_thread_data();
++    thread_data->user_stack_is_enabled = 0;
++    COMPILER_BARRIER;
++    thread_data->user_stack_base_addr = stack_base;
++    thread_data->user_stack_limit_addr = stack_limit;
++    COMPILER_BARRIER;
++    thread_data->user_stack_is_enabled = 1;
++    return SGX_SUCCESS;
++}
++
++void sgx_disable_user_stack(void) {
++    thread_data_t *thread_data = get_thread_data();
++    thread_data->user_stack_is_enabled = 0;
++    COMPILER_BARRIER;
++    thread_data->user_stack_base_addr = 0;
++    thread_data->user_stack_limit_addr = 0;
++}
+diff --git a/sdk/trts/trts_util.h b/sdk/trts/trts_util.h
+index 1ac9007..91cb2a4 100644
+--- a/sdk/trts/trts_util.h
++++ b/sdk/trts/trts_util.h
+@@ -45,8 +45,10 @@ void * get_heap_base(void);
+ size_t get_heap_size(void);
+ size_t get_heap_min_size(void);
+ int * get_errno_addr(void);
+-bool is_stack_addr(void *address, size_t size);
+-bool is_valid_sp(uintptr_t sp);
++bool is_sdk_stack_addr(void *address, size_t size);
++bool is_valid_sdk_sp(uintptr_t sp);
++bool is_user_stack_addr(void *address, size_t size);
++bool is_valid_user_sp(uintptr_t sp);
+ 
+ int heap_init(void *_heap_base, size_t _heap_size, size_t _heap_min_size, int _is_edmm_supported);
+ int feature_supported(const uint64_t *feature_set, uint32_t feature_shift);
+diff --git a/sdk/trts/trts_veh.cpp b/sdk/trts/trts_veh.cpp
+index 706bcb6..4a29acb 100644
+--- a/sdk/trts/trts_veh.cpp
++++ b/sdk/trts/trts_veh.cpp
+@@ -32,8 +32,8 @@
+ 
+ /**
+  * File: trts_veh.cpp
+- * Description: 
+- *     This file implements the support of custom exception handling. 
++ * Description:
++ *     This file implements the support of custom exception handling.
+  */
+ 
+ #include "sgx_trts_exception.h"
+@@ -133,7 +133,7 @@ void *sgx_register_exception_handler(int is_first_handler, sgx_exception_handler
+ // sgx_unregister_exception_handler()
+ //      unregister a custom exception handler.
+ // Parameter
+-//      handler - a handler to the custom exception handler previously 
++//      handler - a handler to the custom exception handler previously
+ // registered using the sgx_register_exception_handler function.
+ // Return Value
+ //      none zero - success
+@@ -259,7 +259,7 @@ extern "C" __attribute__((regparm(1))) void internal_handle_exception(sgx_except
+     // ignore invalid return value, treat to EXCEPTION_CONTINUE_SEARCH
+     // check SP to be written on SSA is pointing to the trusted stack
+     xsp = info->cpu_context.REG(sp);
+-    if (!is_valid_sp(xsp))
++    if (!is_valid_sdk_sp(xsp) && !is_valid_user_sp(xsp))
+     {
+         goto failed_end;
+     }
+@@ -314,27 +314,27 @@ extern "C" sgx_status_t trts_handle_exception(void *tcs)
+     if ((thread_data == NULL) || (tcs == NULL)) goto default_handler;
+     if (check_static_stack_canary(tcs) != 0)
+         goto default_handler;
+- 
++
+     if(get_enclave_state() != ENCLAVE_INIT_DONE)
+     {
+         goto default_handler;
+     }
+-    
++
+     // check if the exception is raised from 2nd phrase
+     if(thread_data->exception_flag == -1) {
+         goto default_handler;
+     }
+- 
+-    if ((TD2TCS(thread_data) != tcs) 
++
++    if ((TD2TCS(thread_data) != tcs)
+             || (((thread_data->first_ssa_gpr)&(~0xfff)) - SE_PAGE_SIZE) != (uintptr_t)tcs) {
+         goto default_handler;
+     }
+ 
+     // no need to check the result of ssa_gpr because thread_data is always trusted
+     ssa_gpr = reinterpret_cast<ssa_gpr_t *>(thread_data->first_ssa_gpr);
+-    
++
+     sp = ssa_gpr->REG(sp);
+-    if(!is_stack_addr((void*)sp, 0))  // check stack overrun only, alignment will be checked after exception handled
++    if(!is_sdk_stack_addr((void*)sp, 0) && !is_user_stack_addr((void*)sp, 0))  // check stack overrun only, alignment will be checked after exception handled
+     {
+         g_enclave_state = ENCLAVE_CRASHED;
+         return SGX_ERROR_STACK_OVERRUN;
+@@ -351,7 +351,7 @@ extern "C" sgx_status_t trts_handle_exception(void *tcs)
+     sp = sp & ~0xF;
+ 
+     // check the decreased sp to make sure it is in the trusted stack range
+-    if(!is_stack_addr((void *)sp, size))
++    if(!is_sdk_stack_addr((void *)sp, size) && !is_user_stack_addr((void*)sp, size))
+     {
+         g_enclave_state = ENCLAVE_CRASHED;
+         return SGX_ERROR_STACK_OVERRUN;
+@@ -361,15 +361,15 @@ extern "C" sgx_status_t trts_handle_exception(void *tcs)
+     // decrease the stack to save the SSA[0]->ip
+     size = sizeof(uintptr_t);
+     sp -= size;
+-    if(!is_stack_addr((void *)sp, size))
++    if(!is_sdk_stack_addr((void *)sp, size) && !is_user_stack_addr((void*)sp, size))
+     {
+         g_enclave_state = ENCLAVE_CRASHED;
+         return SGX_ERROR_STACK_OVERRUN;
+     }
+-    
++
+     // sp is within limit_addr and commit_addr, currently only SGX 2.0 under hardware mode will enter this branch.^M
+-    if((size_t)sp < thread_data->stack_commit_addr)
+-    { 
++    if(is_sdk_stack_addr((void*)sp, 0) && (size_t)sp < thread_data->stack_commit_addr)
++    {
+         int ret = -1;
+         size_t page_aligned_delta = 0;
+         /* try to allocate memory dynamically */
+@@ -434,12 +434,12 @@ extern "C" sgx_status_t trts_handle_exception(void *tcs)
+     ssa_gpr->REG(ax) = (size_t)info;        // 1st parameter (info) for LINUX32
+     ssa_gpr->REG(di) = (size_t)info;        // 1st parameter (info) for LINUX64, LINUX32 also uses it while restoring the context
+     *new_sp = info->cpu_context.REG(ip);    // for debugger to get call trace
+-    
++
+     //mark valid to 0 to prevent eenter again
+     ssa_gpr->exit_info.valid = 0;
+ 
+     return SGX_SUCCESS;
+- 
++
+ default_handler:
+     g_enclave_state = ENCLAVE_CRASHED;
+     return SGX_ERROR_ENCLAVE_CRASHED;
+diff --git a/sdk/tsetjmp/_setjmp.S b/sdk/tsetjmp/_setjmp.S
+index 45cfc65..a59cd04 100644
+--- a/sdk/tsetjmp/_setjmp.S
++++ b/sdk/tsetjmp/_setjmp.S
+@@ -191,7 +191,7 @@ DECLARE_GLOBAL_FUNC longjmp
+     xorl    %eax, %ebx
+     pushl   %ebx
+     /* check restored esp is on current statck */
+-    call    is_valid_sp
++    call    is_valid_sdk_sp
+     cmpl    $0, %eax
+     jz      .crash
+     popl    %ebx   
+@@ -239,7 +239,7 @@ DECLARE_GLOBAL_FUNC longjmp
+     pushq   %rdx
+     /* check restored rsp is on current statck */
+     popq    %rdi
+-    call    is_valid_sp
++    call    is_valid_sdk_sp
+     cmpl    $0, %eax
+     jz      .crash
+     POPAQ

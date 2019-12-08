@@ -1,0 +1,872 @@
+diff --git a/INSTALL b/INSTALL
+index a2a142b..94b1e7b 100644
+--- a/INSTALL
++++ b/INSTALL
+@@ -2,6 +2,27 @@
+ Quick Installation Guide for musl libc
+ ======================================
+ 
++***************************************
++* THIS IS OCCLUM'S FORK OF MUSL LIBC  *
++***************************************
++
++Before compiling this musl libc, make sure Occlum's fork of LLVM toolchain is
++installed. And LLVM's path is included in the PATH environment variable.
++
++Run the following command to generate proper config for Makefile
++
++    CC=clang ./configure --prefix=/usr/local/occlum --enable-wrapper=clang
++
++Then
++
++    make
++    sudo make install
++
++***************************************
++* THE END OF OCCLUM'S SPECIFIC INFO   *
++***************************************
++
++
+ There are many different ways to install musl depending on your usage
+ case. This document covers only the build and installation of musl by
+ itself, which is useful for upgrading an existing musl-based system or
+diff --git a/Makefile b/Makefile
+index b46f8ca..0086df4 100644
+--- a/Makefile
++++ b/Makefile
+@@ -12,24 +12,53 @@ srcdir = .
+ exec_prefix = /usr/local
+ bindir = $(exec_prefix)/bin
+ 
+-prefix = /usr/local/musl
++prefix = /usr/local/occlum
+ includedir = $(prefix)/include
+ libdir = $(prefix)/lib
+ syslibdir = /lib
++clang_version = $(shell clang --version | grep version | sed "s/.*version \([0-9]*\.[0-9]*\.[0-9]*\).*/\1/")
+ 
++# Yes - to build the libc for Occlum
++# No - to build the libc for Linux
++occlum = yes
++
++ifeq ($(occlum),yes)
++SRC_DIRS = $(addprefix $(srcdir)/,src/* crt occlum_stub)
++BASE_GLOBS = $(addsuffix /*.c,$(SRC_DIRS))
++ARCH_GLOBS = $(addsuffix /$(ARCH)/*.[csS],$(SRC_DIRS))
++OCCLUM_GLOBS = $(addsuffix /occlum/*.[csS],$(SRC_DIRS))
++BASE_SRCS = $(sort $(wildcard $(BASE_GLOBS)))
++ARCH_SRCS = $(sort $(wildcard $(ARCH_GLOBS)))
++OCCLUM_SRCS = $(sort $(wildcard $(OCCLUM_GLOBS)))
++else
+ SRC_DIRS = $(addprefix $(srcdir)/,src/* crt ldso)
+ BASE_GLOBS = $(addsuffix /*.c,$(SRC_DIRS))
+ ARCH_GLOBS = $(addsuffix /$(ARCH)/*.[csS],$(SRC_DIRS))
+ BASE_SRCS = $(sort $(wildcard $(BASE_GLOBS)))
+ ARCH_SRCS = $(sort $(wildcard $(ARCH_GLOBS)))
++endif
++
+ BASE_OBJS = $(patsubst $(srcdir)/%,%.o,$(basename $(BASE_SRCS)))
+ ARCH_OBJS = $(patsubst $(srcdir)/%,%.o,$(basename $(ARCH_SRCS)))
++ifeq ($(occlum),yes)
++OCCLUM_OBJS = $(patsubst $(srcdir)/%,%.o,$(basename $(OCCLUM_SRCS)))
++REPLACED_BASE_OBJS = $(sort $(subst /$(ARCH)/,/,$(ARCH_OBJS)))
++REPLACED_ARCH_OBJS = $(sort $(subst /occlum/,/$(ARCH)/,$(OCCLUM_OBJS)))
++ALL_OBJS = $(addprefix obj/, $(filter-out $(REPLACED_BASE_OBJS), $(sort $(BASE_OBJS))) \
++                             $(filter-out $(REPLACED_ARCH_OBJS), $(sort $(ARCH_OBJS))) \
++                             $(OCCLUM_OBJS))
++else
+ REPLACED_OBJS = $(sort $(subst /$(ARCH)/,/,$(ARCH_OBJS)))
+ ALL_OBJS = $(addprefix obj/, $(filter-out $(REPLACED_OBJS), $(sort $(BASE_OBJS) $(ARCH_OBJS))))
++endif
++
++# Occlum Notes:
++# If <a_src_dir>/<arch>/%.[csS] exists, <a_src_dir>/%.c will not be compiled
+ 
+ LIBC_OBJS = $(filter obj/src/%,$(ALL_OBJS))
+ LDSO_OBJS = $(filter obj/ldso/%,$(ALL_OBJS:%.o=%.lo))
+ CRT_OBJS = $(filter obj/crt/%,$(ALL_OBJS))
++STUB_OBJS = $(filter obj/occlum_stub/%,$(ALL_OBJS))
+ 
+ AOBJS = $(LIBC_OBJS)
+ LOBJS = $(LIBC_OBJS:.o=.lo)
+@@ -41,7 +70,7 @@ LDFLAGS =
+ LDFLAGS_AUTO =
+ LIBCC = -lgcc
+ CPPFLAGS =
+-CFLAGS =
++CFLAGS = 
+ CFLAGS_AUTO = -Os -pipe
+ CFLAGS_C99FSE = -std=c99 -ffreestanding -nostdinc 
+ 
+@@ -64,18 +93,35 @@ EMPTY_LIB_NAMES = m rt pthread crypt util xnet resolv dl
+ EMPTY_LIBS = $(EMPTY_LIB_NAMES:%=lib/lib%.a)
+ CRT_LIBS = $(addprefix lib/,$(notdir $(CRT_OBJS)))
+ STATIC_LIBS = lib/libc.a
++ifeq ($(occlum),yes)
++STUB_LIBS = lib/libocclum_stub.so
++SHARED_LIBS =
++else
++STUB_LIBS =
+ SHARED_LIBS = lib/libc.so
++endif
+ TOOL_LIBS = lib/musl-gcc.specs
++ifeq ($(occlum),yes)
++ALL_LIBS = $(CRT_LIBS) $(STATIC_LIBS) $(SHARED_LIBS) $(EMPTY_LIBS) $(TOOL_LIBS) $(STUB_LIBS)
++else
+ ALL_LIBS = $(CRT_LIBS) $(STATIC_LIBS) $(SHARED_LIBS) $(EMPTY_LIBS) $(TOOL_LIBS)
++endif
+ ALL_TOOLS = obj/musl-gcc
+ 
+ WRAPCC_GCC = gcc
+ WRAPCC_CLANG = clang
++WRAPCXX_CLANG = clang++
+ 
+ LDSO_PATHNAME = $(syslibdir)/ld-musl-$(ARCH)$(SUBARCH).so.1
+ 
+ -include config.mak
+ 
++ifeq ($(occlum),yes)
++CLANG_BIN_PATH := $(shell clang -print-prog-name=clang)
++LLVM_PATH := $(abspath $(dir $(CLANG_BIN_PATH))../)
++CFLAGS += -D__OCCLUM -fno-stack-protector -Wno-shift-op-parentheses
++endif
++
+ ifeq ($(ARCH),)
+ 
+ all:
+@@ -135,7 +181,12 @@ CC_CMD = $(CC) $(CFLAGS_ALL) -c -o $@ $<
+ ifeq ($(ADD_CFI),yes)
+ 	AS_CMD = LC_ALL=C awk -f $(srcdir)/tools/add-cfi.common.awk -f $(srcdir)/tools/add-cfi.$(ARCH).awk $< | $(CC) $(CFLAGS_ALL) -x assembler -c -o $@ -
+ else
+-	AS_CMD = $(CC_CMD)
++	# TODO: remove this when -check-store-only=true by default
++	ASFLAGS_ALL := $(CFLAGS_ALL)
++	ASFLAGS_ALL := $(filter-out -mllvm,$(ASFLAGS_ALL))
++	ASFLAGS_ALL := $(filter-out -check-store-only=%,$(ASFLAGS_ALL))
++	AS_CMD = $(CC) $(ASFLAGS_ALL) -c -o $@ $<
++	#AS_CMD := $(CC_CMD)
+ endif
+ 
+ obj/%.o: $(srcdir)/%.s
+@@ -147,6 +198,9 @@ obj/%.o: $(srcdir)/%.S
+ obj/%.o: $(srcdir)/%.c $(GENH) $(IMPH)
+ 	$(CC_CMD)
+ 
++lib/libocclum_stub.so: $(STUB_OBJS)
++	$(CC) $(CFLAGS_ALL) -nostdlib -shared -o $@ $<
++
+ obj/%.lo: $(srcdir)/%.s
+ 	$(AS_CMD)
+ 
+@@ -175,15 +229,24 @@ lib/%.o: obj/crt/$(ARCH)/%.o
+ lib/%.o: obj/crt/%.o
+ 	cp $< $@
+ 
++ifeq ($(occlum),yes)
++lib/musl-gcc.specs: $(srcdir)/tools/occlum-musl-gcc.specs.sh config.mak
++	sh $< "$(includedir)" "$(libdir)" "$(LDSO_PATHNAME)" > $@
++else
+ lib/musl-gcc.specs: $(srcdir)/tools/musl-gcc.specs.sh config.mak
+ 	sh $< "$(includedir)" "$(libdir)" "$(LDSO_PATHNAME)" > $@
++endif
+ 
+ obj/musl-gcc: config.mak
+ 	printf '#!/bin/sh\nexec "$${REALGCC:-$(WRAPCC_GCC)}" "$$@" -specs "%s/musl-gcc.specs"\n' "$(libdir)" > $@
+ 	chmod +x $@
+ 
+ obj/%-clang: $(srcdir)/tools/%-clang.in config.mak
+-	sed -e 's!@CC@!$(WRAPCC_CLANG)!g' -e 's!@PREFIX@!$(prefix)!g' -e 's!@INCDIR@!$(includedir)!g' -e 's!@LIBDIR@!$(libdir)!g' -e 's!@LDSO@!$(LDSO_PATHNAME)!g' $< > $@
++	sed -e 's!@CC@!$(WRAPCC_CLANG)!g' -e 's!@PREFIX@!$(prefix)!g' -e 's!@CLANGVER@!$(clang_version)!g' -e 's!@INCDIR@!$(includedir)!g' -e 's!@LIBDIR@!$(libdir)!g' -e 's!@LDSO@!$(LDSO_PATHNAME)!g' $< > $@
++	chmod +x $@
++
++obj/%-clang++: $(srcdir)/tools/%-clang++.in config.mak
++	sed -e 's!@CXX@!$(WRAPCXX_CLANG)!g' -e 's!@PREFIX@!$(prefix)!g' -e 's!@CLANGVER@!$(clang_version)!g' -e 's!@INCDIR@!$(includedir)!g' -e 's!@LIBDIR@!$(libdir)!g' -e 's!@LDSO@!$(LDSO_PATHNAME)!g' $< > $@
+ 	chmod +x $@
+ 
+ $(DESTDIR)$(bindir)/%: obj/%
+diff --git a/arch/x86_64/bits/syscall.h.in b/arch/x86_64/bits/syscall.h.in
+index bffcc4e..1906e3e 100644
+--- a/arch/x86_64/bits/syscall.h.in
++++ b/arch/x86_64/bits/syscall.h.in
+@@ -332,3 +332,5 @@
+ #define __NR_pkey_free				331
+ #define __NR_statx				332
+ 
++/* Occlum notes: special syscalls of Occlum */
++#define __NR_spawn				360
+diff --git a/arch/x86_64/syscall_arch.h b/arch/x86_64/syscall_arch.h
+index 54e05ff..f9a74d3 100644
+--- a/arch/x86_64/syscall_arch.h
++++ b/arch/x86_64/syscall_arch.h
+@@ -1,6 +1,8 @@
+ #define __SYSCALL_LL_E(x) (x)
+ #define __SYSCALL_LL_O(x) (x)
+ 
++#ifndef __OCCLUM
++
+ static __inline long __syscall0(long n)
+ {
+ 	unsigned long ret;
+@@ -66,3 +68,9 @@ static __inline long __syscall6(long n, long a1, long a2, long a3, long a4, long
+ #define VDSO_CGT_VER "LINUX_2.6"
+ #define VDSO_GETCPU_SYM "__vdso_getcpu"
+ #define VDSO_GETCPU_VER "LINUX_2.6"
++
++#else /* __OCCLUM */
++
++#define SYSCALL_NO_INLINE
++
++#endif /* __OCCLUM */
+diff --git a/configure b/configure
+index 997e665..7fc18ac 100755
+--- a/configure
++++ b/configure
+@@ -121,7 +121,7 @@ LDFLAGS_AUTO=
+ LDFLAGS_TRY=
+ OPTIMIZE_GLOBS=
+ srcdir=
+-prefix=/usr/local/musl
++prefix=/usr/local/occlum
+ exec_prefix='$(prefix)'
+ bindir='$(exec_prefix)/bin'
+ libdir='$(prefix)/lib'
+@@ -293,7 +293,7 @@ tools="$tools obj/musl-gcc"
+ tool_libs="$tool_libs lib/musl-gcc.specs"
+ fi
+ if test "$clang_wrapper" = yes ; then
+-tools="$tools obj/musl-clang obj/ld.musl-clang"
++tools="$tools obj/musl-clang obj/ld.musl-clang obj/musl-clang++ obj/ld.musl-clang++"
+ fi
+ 
+ #
+@@ -725,7 +725,7 @@ libdir = $libdir
+ includedir = $includedir
+ syslibdir = $syslibdir
+ CC = $CC
+-CFLAGS = $CFLAGS
++CFLAGS = $CFLAGS -fPIC -fno-stack-protector
+ CFLAGS_AUTO = $CFLAGS_AUTO
+ CFLAGS_C99FSE = $CFLAGS_C99FSE
+ CFLAGS_MEMOPS = $CFLAGS_MEMOPS
+diff --git a/ldso/dlstart.c b/ldso/dlstart.c
+index 20d50f2..2528436 100644
+--- a/ldso/dlstart.c
++++ b/ldso/dlstart.c
+@@ -20,6 +20,11 @@
+ 
+ hidden void _dlstart_c(size_t *sp, size_t *dynv)
+ {
++}
++
++#if 0
++hidden void _dlstart_c(size_t *sp, size_t *dynv)
++{
+ 	size_t i, aux[AUX_CNT], dyn[DYN_CNT];
+ 	size_t *rel, rel_size, base;
+ 
+@@ -146,3 +151,4 @@ hidden void _dlstart_c(size_t *sp, size_t *dynv)
+ 	GETFUNCSYM(&dls2, __dls2, base+dyn[DT_PLTGOT]);
+ 	dls2((void *)base, sp);
+ }
++#endif /* 0 */
+diff --git a/ldso/dynlink.c b/ldso/dynlink.c
+index ec921df..0bc4b8a 100644
+--- a/ldso/dynlink.c
++++ b/ldso/dynlink.c
+@@ -1396,7 +1396,7 @@ static void update_tls_size()
+  * following stage 2 and stage 3 functions via primitive symbolic lookup
+  * since it does not have access to their addresses to begin with. */
+ 
+-/* Stage 2 of the dynamic linker is called after relative relocations 
++/* Stage 2 of the dynamic linker is called after relative relocations
+  * have been processed. It can make function calls to static functions
+  * and access string literals and static data, but cannot use extern
+  * symbols. Its job is to perform symbolic relocations on the dynamic
+diff --git a/occlum_stub/__occlum_syscall.c b/occlum_stub/__occlum_syscall.c
+new file mode 100644
+index 0000000..b1c9a1f
+--- /dev/null
++++ b/occlum_stub/__occlum_syscall.c
+@@ -0,0 +1,3 @@
++/* For libocclum_dummy.so
++ * This is dummy implementation. Only to resolve symbol def. at link time */
++void __occlum_syscall(void) { }
+diff --git a/rebuild.sh b/rebuild.sh
+new file mode 100755
+index 0000000..d60e8bb
+--- /dev/null
++++ b/rebuild.sh
+@@ -0,0 +1,6 @@
++#/bin/sh
++rm -rf obj
++sudo rm -rf /usr/local/occlum/
++make clean
++make
++sudo make install
+diff --git a/src/internal/locale_impl.h b/src/internal/locale_impl.h
+index 741a71c..7bcea25 100644
+--- a/src/internal/locale_impl.h
++++ b/src/internal/locale_impl.h
+@@ -39,6 +39,8 @@ hidden char *__gettextdomain(void);
+ 
+ #define CURRENT_UTF8 (!!__pthread_self()->locale->cat[LC_CTYPE])
+ 
++#define CURRENT_UTF8 1
++
+ #undef MB_CUR_MAX
+ #define MB_CUR_MAX (CURRENT_UTF8 ? 4 : 1)
+ 
+diff --git a/src/internal/occlum/syscall.s b/src/internal/occlum/syscall.s
+new file mode 100644
+index 0000000..154a02c
+--- /dev/null
++++ b/src/internal/occlum/syscall.s
+@@ -0,0 +1,6 @@
++.global __syscall
++.hidden __syscall
++.type __syscall,@function
++__syscall:
++	jmp __occlum_syscall@PLT
++	ret
+diff --git a/src/internal/syscall.h b/src/internal/syscall.h
+index 06c5527..ae87433 100644
+--- a/src/internal/syscall.h
++++ b/src/internal/syscall.h
+@@ -50,6 +50,9 @@ hidden long __syscall_ret(unsigned long), __syscall(syscall_arg_t, ...),
+ #define __SYSCALL_CONCAT(a,b) __SYSCALL_CONCAT_X(a,b)
+ #define __SYSCALL_DISP(b,...) __SYSCALL_CONCAT(b,__SYSCALL_NARGS(__VA_ARGS__))(__VA_ARGS__)
+ 
++/* Occlum's notes:
++ * __syscall is a raw syscall; syscall sets errno and return -1 if error.
++ */
+ #define __syscall(...) __SYSCALL_DISP(__syscall,__VA_ARGS__)
+ #define syscall(...) __syscall_ret(__syscall(__VA_ARGS__))
+ 
+@@ -64,6 +67,10 @@ hidden long __syscall_ret(unsigned long), __syscall(syscall_arg_t, ...),
+ #define __syscall_cp5(n,a,b,c,d,e) (__syscall_cp)(n,__scc(a),__scc(b),__scc(c),__scc(d),__scc(e),0)
+ #define __syscall_cp6(n,a,b,c,d,e,f) (__syscall_cp)(n,__scc(a),__scc(b),__scc(c),__scc(d),__scc(e),__scc(f))
+ 
++/* Occlum's notes:
++ * syscall_cp are system calls that can serve as cancel points for Pthread.
++ * See thread/__syscall_cp.c and thread/pthread_cancel.c.
++ */
+ #define __syscall_cp(...) __SYSCALL_DISP(__syscall_cp,__VA_ARGS__)
+ #define syscall_cp(...) __syscall_ret(__syscall_cp(__VA_ARGS__))
+ 
+diff --git a/src/malloc/malloc.c b/src/malloc/malloc.c
+index 9698259..6341c1b 100644
+--- a/src/malloc/malloc.c
++++ b/src/malloc/malloc.c
+@@ -495,12 +495,16 @@ void __bin_chunk(struct chunk *self)
+ 	if (reclaim) {
+ 		uintptr_t a = (uintptr_t)self + SIZE_ALIGN+PAGE_SIZE-1 & -PAGE_SIZE;
+ 		uintptr_t b = (uintptr_t)next - SIZE_ALIGN & -PAGE_SIZE;
++#ifdef __OCCLUM
++        memset((void*)a, 0, b-a);
++#else
+ #if 1
+ 		__madvise((void *)a, b-a, MADV_DONTNEED);
+ #else
+ 		__mmap((void *)a, b-a, PROT_READ|PROT_WRITE,
+ 			MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED, -1, 0);
+ #endif
++#endif /* __OCCLUM */
+ 	}
+ 
+ 	unlock_bin(i);
+diff --git a/src/process/fdop.h b/src/process/fdop.h
+index 00b8751..5848cde 100644
+--- a/src/process/fdop.h
++++ b/src/process/fdop.h
+@@ -6,5 +6,9 @@ struct fdop {
+ 	struct fdop *next, *prev;
+ 	int cmd, fd, srcfd, oflag;
+ 	mode_t mode;
+-	char path[];
++#ifndef __OCCLUM
++	const char path[];
++#else
++    const char* path;
++#endif
+ };
+diff --git a/src/process/posix_spawn.c b/src/process/posix_spawn.c
+index 5aaf829..ce114f2 100644
+--- a/src/process/posix_spawn.c
++++ b/src/process/posix_spawn.c
+@@ -9,6 +9,7 @@
+ #include "pthread_impl.h"
+ #include "fdop.h"
+ 
++#ifndef __OCCLUM
+ struct args {
+ 	int p[2];
+ 	sigset_t oldmask;
+@@ -190,3 +191,21 @@ int posix_spawn(pid_t *restrict res, const char *restrict path,
+ 
+ 	return ec;
+ }
++
++#else
++
++int posix_spawn(pid_t *restrict res, const char *restrict path,
++    const posix_spawn_file_actions_t *fa,
++    const posix_spawnattr_t *restrict attr,
++    char *const argv[restrict], char *const envp[restrict])
++{
++    // Reverse the linked list of fdop so that FILO becomes FIFO
++    struct fdop *op = NULL;
++    if (fa && fa->__actions) {
++        for (op = fa->__actions; op->next; op = op->next) { }
++    }
++
++    int ret = syscall(__NR_spawn, res, path, argv, envp, op);
++    return ret;
++}
++#endif
+diff --git a/src/process/posix_spawn_file_actions_addopen.c b/src/process/posix_spawn_file_actions_addopen.c
+index 368922c..d36455b 100644
+--- a/src/process/posix_spawn_file_actions_addopen.c
++++ b/src/process/posix_spawn_file_actions_addopen.c
+@@ -6,13 +6,21 @@
+ 
+ int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t *restrict fa, int fd, const char *restrict path, int flags, mode_t mode)
+ {
++#ifndef __OCCLUM
+ 	struct fdop *op = malloc(sizeof *op + strlen(path) + 1);
++#else
++	struct fdop *op = malloc(sizeof *op);
++#endif
+ 	if (!op) return ENOMEM;
+ 	op->cmd = FDOP_OPEN;
+ 	op->fd = fd;
+ 	op->oflag = flags;
+ 	op->mode = mode;
++#ifndef __OCCLUM
+ 	strcpy(op->path, path);
++#else
++	op->path = path;
++#endif
+ 	if ((op->next = fa->__actions)) op->next->prev = op;
+ 	op->prev = 0;
+ 	fa->__actions = op;
+diff --git a/src/stdio/fwrite.c b/src/stdio/fwrite.c
+index 7a567b2..7c532df 100644
+--- a/src/stdio/fwrite.c
++++ b/src/stdio/fwrite.c
+@@ -9,6 +9,9 @@ size_t __fwritex(const unsigned char *restrict s, size_t l, FILE *restrict f)
+ 
+ 	if (l > f->wend - f->wpos) return f->write(f, s, l);
+ 
++    /* Occlum's note:
++     * If the file uses a line buffer, then try to flush all contents til the
++     * last \n character, and put the remaining part into the buffer */
+ 	if (f->lbf >= 0) {
+ 		/* Match /^(.*\n|)/ */
+ 		for (i=l; i && s[i-1] != '\n'; i--);
+diff --git a/src/thread/occlum/__set_thread_area.s b/src/thread/occlum/__set_thread_area.s
+new file mode 100644
+index 0000000..6593ca4
+--- /dev/null
++++ b/src/thread/occlum/__set_thread_area.s
+@@ -0,0 +1,27 @@
++.text
++.global __set_thread_area
++.hidden __set_thread_area
++.type __set_thread_area,@function
++__set_thread_area:
++    // Func args:
++    //  void* addr - %rdi
++
++    // Make %rsp 16-aligned before call
++    sub $8, %rsp
++
++    // Pass addr
++    mov %rdi, %rdx
++    // Pass SET_FS
++    mov $158, %edi
++    // Pass syscall num
++    mov $0x1002, %esi
++    // arch_prctl syscall args:
++    //  int num     - %rdi
++    //  int code    - %rsi
++    //  void* addr  - %rdx
++    call __syscall
++
++    // Restore %rsp
++    add $8, %rsp
++
++    ret
+diff --git a/src/thread/occlum/__unmapself.s b/src/thread/occlum/__unmapself.s
+new file mode 100644
+index 0000000..9490bc8
+--- /dev/null
++++ b/src/thread/occlum/__unmapself.s
+@@ -0,0 +1,24 @@
++.text
++.global __unmapself
++.type   __unmapself,@function
++__unmapself:
++    // Function args:
++    //   void* base  - %rdi
++    //   size_t size - %rsi
++    mov %rsi, %rdx
++    mov %rdi, %rsi
++    movl $11, %edi
++    // mmap args
++    //   num         - %rdi
++    //   void* base  - %rsi
++    //   size_t size - %rdx
++    call __syscall
++    // exit args
++    //   num        - %rdi
++    //   exit_code  - %rsi
++    movl $60, %edi
++    xor %esi, %esi
++    call __syscall
++
++    // This should never happen!
++    hlt
+diff --git a/src/thread/occlum/clone.s b/src/thread/occlum/clone.s
+new file mode 100644
+index 0000000..ac445a3
+--- /dev/null
++++ b/src/thread/occlum/clone.s
+@@ -0,0 +1,85 @@
++.text
++.global __child_start
++.hidden __child_start
++.type   __child_start,@function
++__child_start:
++    // 16(%rsp) - void* args
++    mov 16(%rsp), %rdi
++    // 8(%rsp)  - int(*func)(void*)
++    mov 8(%rsp), %rcx
++    // Make %rsp 16-aligned before call
++    and $-16, %rsp
++    // Call user-given thread function
++    call *%rcx
++
++    // Call exit syscall
++    //  int syscall_num - %rdi
++    //  int exit_code - %rsi
++    mov $60, %rdi
++    mov %rax, %rsi
++    call __syscall
++
++    // This should never happen!
++    hlt
++
++.text
++.global __clone
++.hidden __clone
++.type   __clone,@function
++__clone:
++    // Func args:
++    //  int(*func)(void*) - %rdi
++    //  void* stack - %rsi
++    //  int flags   - %rdx
++    //  void* args  - %rcx
++    //  int* ptid   - %r8
++    //  unsigned long newtls - %r9
++    //  int* ctid   - *0x8(%rsp)
++
++    //
++    // Pass args to the stack of the child
++    //
++    // Save child stack addr into another scratch register
++    mov %rsi, %r10
++    // Make child stack addr 16-byte aligned initially
++    and $-16, %r10
++    // Push args into the stack of the child
++    sub $8, %r10
++    mov %rcx, (%r10)
++    // Push func into the stack of the child
++    sub $8, %r10
++    mov %rdi, (%r10)
++    // Push "return address" for syscall
++    // LibOS will find the entry point of the child by popping
++    // the value from the top of the stack of the new thread.
++    sub $8, %r10
++    mov __child_start@GOTPCREL(%rip), %r11
++    mov %r11, (%r10)
++
++    //
++    // Pass args to regiters
++    //
++    // The syscall number of clone is 56
++    mov $56, %rdi
++    // Pass flags
++    mov %rdx, %rsi
++    // Pass child stack addr
++    mov %r10, %rdx
++    // Pass ptid
++    mov %r8, %rcx
++    // Pass ctid
++    mov 8(%rsp), %r8
++    // Pass newtls
++    // mov %r9, %r9
++
++    //
++    // Call clone syscall
++    //
++    //  int num              - %rdi
++    //  unsigned long flags  - %rsi
++    //  void* stack          - %rdx
++    //  int* ptid            - %rcx
++    //  int* ctid            - %r8
++    //  unsigned long newtls - %r9
++    call __syscall
++    ret
+diff --git a/src/time/gettimeofday.c b/src/time/gettimeofday.c
+index 691f8e9..cbb34b1 100644
+--- a/src/time/gettimeofday.c
++++ b/src/time/gettimeofday.c
+@@ -4,10 +4,14 @@
+ 
+ int gettimeofday(struct timeval *restrict tv, void *restrict tz)
+ {
++#ifndef __OCCLUM
+ 	struct timespec ts;
+ 	if (!tv) return 0;
+ 	clock_gettime(CLOCK_REALTIME, &ts);
+ 	tv->tv_sec = ts.tv_sec;
+ 	tv->tv_usec = (int)ts.tv_nsec / 1000;
++#else
++	__syscall(SYS_gettimeofday, tv, tz);
++#endif
+ 	return 0;
+ }
+diff --git a/src/unistd/lseek.c b/src/unistd/lseek.c
+index bf8cd85..66d5363 100644
+--- a/src/unistd/lseek.c
++++ b/src/unistd/lseek.c
+@@ -1,6 +1,13 @@
+ #include <unistd.h>
+ #include "syscall.h"
+ 
++/* Occlum's notes:
++ * We haven't implemented llseek. So, just use lseek.
++ */
++#ifdef __OCCLUM
++#undef SYS__llseek
++#endif
++
+ off_t lseek(int fd, off_t offset, int whence)
+ {
+ #ifdef SYS__llseek
+diff --git a/test/Makefile b/test/Makefile
+new file mode 100644
+index 0000000..8f2394d
+--- /dev/null
++++ b/test/Makefile
+@@ -0,0 +1,26 @@
++CC := /usr/local/occlum/bin/musl-gcc
++CFLAGS :=
++LFLAGS :=
++BUILD_DIR := build
++
++BIN = $(BUILD_DIR)/main
++BIN_OBJ = $(BUILD_DIR)/main.o
++BIN_SRC = main.c
++
++all: $(BUILD_DIR) $(BIN)
++	readelf -a $(BIN) > $(BUILD_DIR)/main.readelf
++	objdump -d $(BIN) > $(BUILD_DIR)/main.objdump
++
++$(BUILD_DIR):
++	mkdir -p $(BUILD_DIR)
++
++$(BIN): $(BIN_OBJ) $(LIB_SO)
++	$(CC) $(LFLAGS) -o $@ $<
++
++$(BIN_OBJ): $(BIN_SRC)
++	$(CC) $(CFLAGS) -c -o $@ $<
++
++clean:
++	rm -rf $(BUILD_DIR)
++
++.PHONY: all clean $(BUILD_DIR)
+diff --git a/test/main.c b/test/main.c
+new file mode 100644
+index 0000000..0d2dd2f
+--- /dev/null
++++ b/test/main.c
+@@ -0,0 +1,5 @@
++//#include <stdio.h>
++
++int main(void) {
++    return 100;
++}
+diff --git a/tools/ld.musl-clang++.in b/tools/ld.musl-clang++.in
+new file mode 100644
+index 0000000..1437ba6
+--- /dev/null
++++ b/tools/ld.musl-clang++.in
+@@ -0,0 +1,52 @@
++#!/bin/sh
++cc="@CXX@"
++libc_lib="@LIBDIR@"
++ldso="@LDSO@"
++cleared=
++shared=
++userlinkdir=
++userlink=
++
++for x ; do
++    test "$cleared" || set -- ; cleared=1
++
++    case "$x" in
++        -L-user-start)
++            userlinkdir=1
++            ;;
++        -L-user-end)
++            userlinkdir=
++            ;;
++        -L*)
++            test "$userlinkdir" && set -- "$@" "$x"
++            ;;
++        -l-user-start)
++            userlink=1
++            ;;
++        -l-user-end)
++            userlink=
++            ;;
++        crtbegin*.o|crtend*.o)
++            # set -- "$@" "$libc_lib"/$x
++            set -- "$@" $($cc -print-file-name=$x)
++            ;;
++        -lgcc|-lgcc_eh)
++            file=lib${x#-l}.a
++            set -- "$@" $($cc -print-file-name=$file)
++            ;;
++        -l*)
++            test "$userlink" && set -- "$@" "$x"
++            ;;
++        -shared)
++            shared=1
++            set -- "$@" -shared
++            ;;
++        -sysroot=*|--sysroot=*)
++            ;;
++        *)
++            set -- "$@" "$x"
++            ;;
++    esac
++done
++
++exec $($cc -print-prog-name=ld) -nostdlib "$@" -lc++ -lc++abi -lunwind -lc -dynamic-linker "$ldso"
+diff --git a/tools/musl-clang++.in b/tools/musl-clang++.in
+new file mode 100644
+index 0000000..285363d
+--- /dev/null
++++ b/tools/musl-clang++.in
+@@ -0,0 +1,41 @@
++#!/bin/sh
++cc="@CXX@"
++libc="@PREFIX@"
++clang_ver="@CLANGVER@"
++libc_inc="@INCDIR@"
++libc_lib="@LIBDIR@"
++thisdir="`cd "$(dirname "$0")"; pwd`"
++
++# prevent clang from running the linker (and erroring) on no input.
++sflags=
++eflags=
++for x ; do
++    case "$x" in
++        -l*) input=1 ;;
++        *) input= ;;
++    esac
++    if test "$input" ; then
++        sflags="-l-user-start"
++        eflags="-l-user-end"
++        break
++    fi
++done
++
++exec $cc \
++    -B"$thisdir" \
++    -fuse-ld=musl-clang++ \
++    -static-libgcc \
++    -nostdinc \
++    -nostdinc++ \
++    --sysroot "$libc" \
++    -isystem "$libc_inc" \
++    -isystem "$libc_lib"/clang/"$clang_ver"/include \
++    -I "$libc_inc"/c++/v1 \
++    -stdlib=libc++ \
++    -L-user-start \
++    $sflags \
++    "$@" \
++    $eflags \
++    -L"$libc_lib" \
++    -L-user-end \
++    -Wno-unused-command-line-argument
+diff --git a/tools/musl-clang.in b/tools/musl-clang.in
+index 623de6f..2fdcdbb 100644
+--- a/tools/musl-clang.in
++++ b/tools/musl-clang.in
+@@ -1,6 +1,7 @@
+ #!/bin/sh
+ cc="@CC@"
+ libc="@PREFIX@"
++clang_ver="@CLANGVER@"
+ libc_inc="@INCDIR@"
+ libc_lib="@LIBDIR@"
+ thisdir="`cd "$(dirname "$0")"; pwd`"
+@@ -27,9 +28,11 @@ exec $cc \
+     -nostdinc \
+     --sysroot "$libc" \
+     -isystem "$libc_inc" \
++    -isystem "$libc_lib"/clang/"$clang_ver"/include \
+     -L-user-start \
+     $sflags \
+     "$@" \
+     $eflags \
+     -L"$libc_lib" \
+-    -L-user-end
++    -L-user-end \
++    -Wno-unused-command-line-argument
+diff --git a/tools/occlum-musl-gcc.specs.sh b/tools/occlum-musl-gcc.specs.sh
+new file mode 100644
+index 0000000..e489441
+--- /dev/null
++++ b/tools/occlum-musl-gcc.specs.sh
+@@ -0,0 +1,37 @@
++incdir=$1
++libdir=$2
++ldso=$3
++cat <<EOF
++%rename cpp_options old_cpp_options
++
++*cpp_options:
++-nostdinc -isystem $incdir -isystem include%s %(old_cpp_options)
++
++*cc1:
++%(cc1_cpu) -fno-builtin -fPIC -fno-stack-protector -nostdinc -isystem $incdir -isystem include%s
++
++*link_libgcc:
++-L$libdir -L .%s
++
++*libgcc:
++libgcc.a%s %:if-exists(libgcc_eh.a%s)
++
++*startfile:
++%{!shared: $libdir/Scrt1.o} $libdir/crti.o crtbeginS.o%s
++
++*endfile:
++crtendS.o%s $libdir/crtn.o
++
++*link:
++-locclum_stub -dynamic-linker $ldso -nostdlib %{shared:-shared} %{static:-static} %{rdynamic:-export-dynamic} %{!shared:-pie}
++
++*esp_link:
++
++
++*esp_options:
++
++
++*esp_cpp_options:
++
++
++EOF

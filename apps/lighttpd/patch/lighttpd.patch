@@ -1,0 +1,419 @@
+diff -ruN ../lighttpd-1.4.40/configure ./configure
+--- ../lighttpd-1.4.40/configure	2016-07-16 18:10:50.000000000 +0800
++++ ./configure	2019-12-04 21:02:22.786070427 +0800
+@@ -1313,6 +1313,7 @@
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff -ruN ../lighttpd-1.4.40/lighttpd.patch ./lighttpd.patch
+--- ../lighttpd-1.4.40/lighttpd.patch	1970-01-01 08:00:00.000000000 +0800
++++ ./lighttpd.patch	2019-12-04 21:02:51.710714978 +0800
+@@ -0,0 +1,11 @@
++diff -ruN ../lighttpd-1.4.40/configure ./configure
++--- ../lighttpd-1.4.40/configure	2016-07-16 18:10:50.000000000 +0800
+++++ ./configure	2019-12-04 21:02:22.786070427 +0800
++@@ -1313,6 +1313,7 @@
++     cross_compiling=yes
++   fi
++ fi
+++    cross_compiling=yes
++ 
++ ac_tool_prefix=
++ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff -ruN ../lighttpd-1.4.40/src/base.h ./src/base.h
+--- ../lighttpd-1.4.40/src/base.h	2016-07-16 18:06:16.000000000 +0800
++++ ./src/base.h	2019-12-04 21:02:16.677934414 +0800
+@@ -27,6 +27,7 @@
+ #include "splaytree.h"
+ #include "etag.h"
+ 
++#define USE_SPAWN
+ 
+ #if defined HAVE_LIBSSL && defined HAVE_OPENSSL_SSL_H
+ # define USE_OPENSSL
+@@ -686,6 +687,8 @@
+ 
+ 	uid_t uid;
+ 	gid_t gid;
++
++  int spawn_child;
+ } server;
+ 
+ 
+diff -ruN ../lighttpd-1.4.40/src/fdevent.c ./src/fdevent.c
+--- ../lighttpd-1.4.40/src/fdevent.c	2016-07-16 18:06:16.000000000 +0800
++++ ./src/fdevent.c	2019-12-04 21:02:16.677934414 +0800
+@@ -224,6 +224,17 @@
+ 	return ev->fdarray[fd]->ctx;
+ }
+ 
++void fd_clear_close_on_exec(int fd){
++#ifdef FD_CLOEXEC
++	if (fd < 0) return;
++  int old_flags = fcntl(fd,F_GETFD,0);
++  force_assert(old_flags != -1);
++  old_flags &= ~FD_CLOEXEC;
++	force_assert(-1 != fcntl(fd, F_SETFD, old_flags));
++#else
++	UNUSED(fd);
++#endif
++}
+ void fd_close_on_exec(int fd) {
+ #ifdef FD_CLOEXEC
+ 	if (fd < 0) return;
+diff -ruN ../lighttpd-1.4.40/src/fdevent.h ./src/fdevent.h
+--- ../lighttpd-1.4.40/src/fdevent.h	2016-07-16 18:06:16.000000000 +0800
++++ ./src/fdevent.h	2019-12-04 21:02:16.677934414 +0800
+@@ -204,6 +204,7 @@
+ int fdevent_unregister(fdevents *ev, int fd);
+ 
+ void fd_close_on_exec(int fd);
++void fd_clear_close_on_exec(int fd);
+ int fdevent_fcntl_set(fdevents *ev, int fd);
+ 
+ int fdevent_select_init(fdevents *ev);
+diff -ruN ../lighttpd-1.4.40/src/Makefile.am ./src/Makefile.am
+--- ../lighttpd-1.4.40/src/Makefile.am	2016-07-16 18:06:16.000000000 +0800
++++ ./src/Makefile.am	2019-12-04 21:02:16.677934414 +0800
+@@ -302,6 +302,7 @@
+ lighttpd_SOURCES = \
+   $(src) \
+   mod_access.c \
++	mod_evhost.c \
+   mod_accesslog.c \
+   mod_alias.c \
+   mod_auth.c http_auth.c \
+diff -ruN ../lighttpd-1.4.40/src/network.c ./src/network.c
+--- ../lighttpd-1.4.40/src/network.c	2016-07-16 18:06:16.000000000 +0800
++++ ./src/network.c	2019-12-04 21:02:16.677934414 +0800
+@@ -180,6 +180,9 @@
+ 	const char *host;
+ 	buffer *b;
+ 	int err;
++  if(srv->spawn_child == 1){
++    return 0;
++  }
+ 
+ #ifdef __WIN32
+ 	WORD wVersionRequested;
+@@ -361,7 +364,7 @@
+ 		if (s->ssl_enabled) srv_socket->ssl_ctx = s->ssl_ctx;
+ #endif
+ 		goto srv_sockets_append;
+-	}
++}
+ 
+ #ifdef HAVE_SYS_UN_H
+ 	if (AF_UNIX == srv_socket->addr.plain.sa_family) {
+@@ -560,6 +563,17 @@
+ 
+ 	return 0;
+ }
++int network_fd_clear_close_on_exec(server *srv){
++	size_t i;
++	for (i = 0; i < srv->srv_sockets.used; i++) {
++		server_socket *srv_socket = srv->srv_sockets.ptr[i];
++		if (srv_socket->fd != -1) {
++      printf("clear for %d\n", srv_socket->fd);
++			fd_clear_close_on_exec(srv_socket->fd);
++		}
++	}
++	return 0;
++}
+ 
+ typedef enum {
+ 	NETWORK_BACKEND_UNSET,
+diff -ruN ../lighttpd-1.4.40/src/plugin-static.h ./src/plugin-static.h
+--- ../lighttpd-1.4.40/src/plugin-static.h	1970-01-01 08:00:00.000000000 +0800
++++ ./src/plugin-static.h	2019-12-04 21:02:16.681934504 +0800
+@@ -0,0 +1,32 @@
++PLUGIN_INIT(mod_usertrack)
++PLUGIN_INIT(mod_redirect)
++PLUGIN_INIT(mod_setenv)
++PLUGIN_INIT(mod_compress)
++PLUGIN_INIT(mod_alias)
++PLUGIN_INIT(mod_extforward)
++PLUGIN_INIT(mod_magnet)
++PLUGIN_INIT(mod_userdir)
++PLUGIN_INIT(mod_cgi)
++PLUGIN_INIT(mod_simple_vhost)
++PLUGIN_INIT(mod_trigger_b4_dl)
++PLUGIN_INIT(mod_proxy)
++PLUGIN_INIT(mod_status)
++PLUGIN_INIT(mod_webdav)
++PLUGIN_INIT(mod_fastcgi)
++PLUGIN_INIT(mod_auth)
++PLUGIN_INIT(mod_evasive)
++PLUGIN_INIT(mod_flv_streaming)
++PLUGIN_INIT(mod_scgi)
++PLUGIN_INIT(mod_cml)
++PLUGIN_INIT(mod_staticfile)
++PLUGIN_INIT(mod_indexfile)
++PLUGIN_INIT(mod_mysql_vhost)
++PLUGIN_INIT(mod_expire)
++PLUGIN_INIT(mod_accesslog)
++PLUGIN_INIT(mod_evhost)
++PLUGIN_INIT(mod_ssi)
++PLUGIN_INIT(mod_rrdtool)
++PLUGIN_INIT(mod_rewrite)
++PLUGIN_INIT(mod_secdownload)
++PLUGIN_INIT(mod_dirlisting)
++PLUGIN_INIT(mod_access)
+diff -ruN ../lighttpd-1.4.40/src/server.c ./src/server.c
+--- ../lighttpd-1.4.40/src/server.c	2016-07-16 18:06:16.000000000 +0800
++++ ./src/server.c	2019-12-04 21:02:16.681934504 +0800
+@@ -25,6 +25,7 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <unistd.h>
++#include <spawn.h>
+ #include <stdlib.h>
+ #include <time.h>
+ #include <signal.h>
+@@ -78,6 +79,7 @@
+ # endif
+ #endif
+ 
++
+ static int oneshot_fd = 0;
+ static volatile sig_atomic_t srv_shutdown = 0;
+ static volatile sig_atomic_t graceful_shutdown = 0;
+@@ -287,6 +289,7 @@
+ 	srv->errorlog_mode = ERRORLOG_FD;
+ 
+ 	srv->split_vals = array_init();
++  srv->spawn_child = 0;
+ 
+ 	return srv;
+ }
+@@ -556,7 +559,11 @@
+ #undef TEXT_SSL
+ 	write_all(STDOUT_FILENO, b, strlen(b));
+ }
+-
++static void show_argvs(int argc, char** argv){
++  for(int i = 0; i < argc; i++){
++    printf("argv[%d]: %s\n",i, argv[i]);
++  }
++}
+ static void show_features (void) {
+   const char features[] = ""
+ #ifdef USE_SELECT
+@@ -721,6 +728,7 @@
+ " -i <secs>  graceful shutdown after <secs> of inactivity\n" \
+ " -1         process single (one) request on stdin socket, then exit\n" \
+ " -p         print the parsed config-file in internal form, and exit\n" \
++" -c         This is a spawn child. It will do a spawn child should do\n" \
+ " -t         test config-file syntax, then exit\n" \
+ " -tt        test config-file syntax, load and init modules, then exit\n" \
+ " -D         don't go to background (default: go to background)\n" \
+@@ -733,8 +741,72 @@
+ #undef TEXT_IPV6
+ 	write_all(STDOUT_FILENO, b, strlen(b));
+ }
++static int trans_buffer(buffer * buf, int fd){
++  size_t wsize;
++  wsize = write(fd, buf, sizeof(buffer));
++  if(wsize == -1){
++    perror("trans buffer");
++  }
++  wsize = write(fd, buf->ptr, buf->size);
++  if(wsize == -1){
++    perror("trans buffer");
++  }
++  return 0;
++}
++static buffer *recv_buffer(int fd){
++  buffer * buf = buffer_init();
++  if(-1 == read(fd, buf, sizeof(buffer))){
++    perror("recv buffer");
++  }
++  size_t size = buf->size;
++  buf->ptr = malloc(sizeof(char) * size);
++  read(fd, buf->ptr, size);
++  /* printf("buffer size :%d, buffer content: %s\n", buf->size, buf->ptr); */
++  return buf;
++}
++
++static int trans_parent(server *srv, int fd){
++  //trans server_socket_array
++  printf("srv used sockets: %d\n", srv->srv_sockets.used);
++  size_t wsize;
++  wsize = write(fd,&(srv->srv_sockets), sizeof(srv->srv_sockets));
++  if (wsize == -1 ){
++    perror("transfer parent error");
++  }
++
++  for(size_t i = 0; i < srv->srv_sockets.used; i++){
++    server_socket *srv_socket = srv->srv_sockets.ptr[i];
++    wsize = write(fd, srv_socket, sizeof(*srv_socket));
++    if(wsize == -1){
++      perror ("transfer parent");
++    }
++    trans_buffer(srv_socket->srv_token,fd);
++#ifdef USE_OPENSSL
++    trans_buffer(srv_socket->ssl_ctx,fd);
++#endif 
++  }
++}
+ 
+-int main (int argc, char **argv) {
++static int recv_parent(server *srv, int fd){
++  char buffer[1024];
++  read(fd, buffer,sizeof(srv->srv_sockets));
++  memcpy(&(srv->srv_sockets), buffer, sizeof(srv->srv_sockets));
++  printf("srv used sockets: %d\n", srv->srv_sockets.used);
++  srv->srv_sockets.ptr = malloc(srv->srv_sockets.size * sizeof(server_socket *));
++  for(size_t i = 0; i < srv->srv_sockets.used; i++) {
++    server_socket * srv_socket = srv_socket = calloc(1, sizeof(*srv_socket)); 
++    read(fd, srv_socket, sizeof(*srv_socket));
++    srv_socket->srv_token = recv_buffer(fd);
++    printf("buffer: %s\n",srv_socket->srv_token->ptr);
++#ifdef USE_OPENSSL
++    srv_socket->ssl_ctx = recv_buffer(fd);
++#endif 
++    srv->srv_sockets.ptr[i] = srv_socket;
++  }
++}
++
++int main (int argc, char **argv, char* envp[]) {
++  /* show_argvs(argc, argv); */
+ 	server *srv = NULL;
+ 	int print_config = 0;
+ 	int test_config = 0;
+@@ -783,7 +855,7 @@
+ 	srv->srvconf.dont_daemonize = 0;
+ 	srv->srvconf.preflight_check = 0;
+ 
+-	while(-1 != (o = getopt(argc, argv, "f:m:i:hvVD1pt"))) {
++	while(-1 != (o = getopt(argc, argv, "f:m:i:hvVD1ptc"))) {
+ 		switch(o) {
+ 		case 'f':
+ 			if (srv->config_storage) {
+@@ -815,6 +887,7 @@
+ 		}
+ 		case 'p': print_config = 1; break;
+ 		case 't': ++test_config; break;
++		case 'c': srv->spawn_child = 1; break;
+ 		case '1': oneshot_fd = dup(STDIN_FILENO); break;
+ 		case 'D': srv->srvconf.dont_daemonize = 1; break;
+ 		case 'v': show_version(); server_free(srv); return 0;
+@@ -862,6 +935,14 @@
+ 		return 0;
+ 	}
+ 
++  if (srv->spawn_child){
++    printf("Spawn child startup\n");
++    recv_parent(srv, STDIN_FILENO);
++    /* close(STDIN_FILENO); */
++    /* server_free(srv); */
++    /* return 0; */
++  }
++
+ 	if (oneshot_fd) {
+ 		if (oneshot_fd <= STDERR_FILENO) {
+ 			log_error_write(srv, __FILE__, __LINE__, "s",
+@@ -882,7 +963,7 @@
+ 
+ 	/* close stdin and stdout, as they are not needed */
+ 	openDevNull(STDIN_FILENO);
+-	openDevNull(STDOUT_FILENO);
++	/* openDevNull(STDOUT_FILENO); */
+ 
+ 	if (0 != config_set_defaults(srv)) {
+ 		log_error_write(srv, __FILE__, __LINE__, "s",
+@@ -925,6 +1006,7 @@
+ 	}
+ 
+ 	/* open pid file BEFORE chroot */
++  if(srv->spawn_child == 0)
+ 	if (!buffer_string_is_empty(srv->srvconf.pid_file)) {
+ 		if (-1 == (pid_fd = open(srv->srvconf.pid_file->ptr, O_WRONLY | O_CREAT | O_EXCL | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH))) {
+ 			struct stat st;
+@@ -1051,7 +1133,6 @@
+ 		if (0 != network_init(srv)) {
+ 			plugins_free(srv);
+ 			server_free(srv);
+-
+ 			return -1;
+ 		}
+ #ifdef HAVE_PWD_H
+@@ -1153,6 +1234,7 @@
+ 			}
+ 		}
+ 
++    /* if(srv->spawn_child == 0 ) */
+ 		if (0 != network_init(srv)) {
+ 			plugins_free(srv);
+ 			server_free(srv);
+@@ -1343,12 +1425,50 @@
+ 				"server idle time limit command line option disables server.max-worker config file option.");
+ 	}
+ 
++  if(srv->spawn_child == 1) goto child_start;
+ 	/* start watcher and workers */
+ 	num_childs = srv->srvconf.max_worker;
+ 	if (num_childs > 0) {
+ 		int child = 0;
++#ifdef USE_SPAWN
++    // init posix_spawn argv
++    pid_t pid;
++    char *new_argv[argc+2];
++    for(int i = 0; i< argc; i++){
++      new_argv[i] = (char*)malloc(strlen(argv[i]));
++      strncpy(new_argv[i], argv[i], strlen(argv[i])+1);
++    }
++    new_argv[argc] = (char*)malloc(sizeof(char)*3);
++    strncpy(new_argv[argc], "-c", sizeof(char)*3);
++    new_argv[argc+1] = NULL;
++#endif
++
+ 		while (!child && !srv_shutdown && !graceful_shutdown) {
+ 			if (num_childs > 0) {
++#ifdef USE_SPAWN
++        //clear needed fd
++        network_fd_clear_close_on_exec(srv);
++        int pipefd[2];
++        if(pipe(pipefd) <0)exit(-1);
++        posix_spawn_file_actions_t fa;
++        posix_spawn_file_actions_t* fap = &fa;
++        posix_spawn_file_actions_init(fap);
++        posix_spawn_file_actions_adddup2(fap, pipefd[0], STDIN_FILENO);
++        posix_spawn_file_actions_addclose(fap, pipefd[1]);
++        posix_spawn_file_actions_addclose(fap, pipefd[1]);
++
++        int s = posix_spawn(&pid, "/sbin/lighttpd", fap, NULL, new_argv, envp);
++        close(pipefd[0]);
++        trans_parent(srv, pipefd[1]);
++        close(pipefd[1]);
++
++        switch(s){
++          case 0:
++            num_childs--;break;
++          default:
++            return -1;
++        }
++#else
+ 				switch (fork()) {
+ 				case -1:
+ 					return -1;
+@@ -1359,6 +1479,7 @@
+ 					num_childs--;
+ 					break;
+ 				}
++#endif 
+ 			} else {
+ 				int status;
+ 
+@@ -1429,6 +1550,7 @@
+ 		buffer_reset(srv->srvconf.pid_file);
+ 	}
+ #endif
++child_start:
+ 
+ 	if (NULL == (srv->ev = fdevent_init(srv, srv->max_fds + 1, srv->event_handler))) {
+ 		log_error_write(srv, __FILE__, __LINE__,

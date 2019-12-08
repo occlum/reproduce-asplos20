@@ -1,0 +1,312 @@
+diff --git a/configure b/configure
+index 2925c1a..b3f76f0 100755
+--- a/configure
++++ b/configure
+@@ -648,7 +648,8 @@ done
+ build=$build_alias
+ host=$host_alias
+ target=$target_alias
+-
++# set host as different with build, so the xgcc will not be invoked
++host=occlum
+ # FIXME: To remove some day.
+ if test "x$host_alias" != x; then
+   if test "x$build_alias" = x; then
+@@ -659,6 +660,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+@@ -1579,11 +1581,11 @@ echo "$as_me: error: $ac_config_sub $ac_cv_build_alias failed" >&2;}
+ 
+ fi
+ echo "$as_me:$LINENO: result: $ac_cv_build" >&5
+-echo "${ECHO_T}$ac_cv_build" >&6
++echo "${ECHO_T}$ac_cv_Build" >&6
+ build=$ac_cv_build
+-build_cpu=`echo $ac_cv_build | sed 's/^\([^-]*\)-\([^-]*\)-\(.*\)$/\1/'`
+-build_vendor=`echo $ac_cv_build | sed 's/^\([^-]*\)-\([^-]*\)-\(.*\)$/\2/'`
+-build_os=`echo $ac_cv_build | sed 's/^\([^-]*\)-\([^-]*\)-\(.*\)$/\3/'`
++  Build_cpu=`echo $ac_cv_build | sed 's/^\([^-]*\)-\([^-]*\)-\(.*\)$/\1/'`
++    Build_vendor=`echo $ac_cv_build | sed 's/^\([^-]*\)-\([^-]*\)-\(.*\)$/\2/'`
++  build_os=`echo $ac_cv_build | sed 's/^\([^-]*\)-\([^-]*\)-\(.*\)$/\3/'`
+ 
+ 
+  case ${build_alias} in
+@@ -1633,6 +1635,7 @@ host=$ac_cv_host
+ host_cpu=`echo $ac_cv_host | sed 's/^\([^-]*\)-\([^-]*\)-\(.*\)$/\1/'`
+ host_vendor=`echo $ac_cv_host | sed 's/^\([^-]*\)-\([^-]*\)-\(.*\)$/\2/'`
+ host_os=`echo $ac_cv_host | sed 's/^\([^-]*\)-\([^-]*\)-\(.*\)$/\3/'`
++host=occlum
+ 
+ 
+ echo "$as_me:$LINENO: checking target system type" >&5
+@@ -11741,6 +11744,7 @@ fi
+ 
+ echo "$as_me:$LINENO: checking where to find the target cc" >&5
+ echo $ECHO_N "checking where to find the target cc... $ECHO_C" >&6
++echo "build: ${build} and host: ${host}">&6
+ if test "x${build}" != "x${host}" ; then
+   if expr "x$CC_FOR_TARGET" : "x/" > /dev/null; then
+     # We already found the complete path
+diff --git a/fixincludes/configure b/fixincludes/configure
+index e14e816..9815f5a 100755
+--- a/fixincludes/configure
++++ b/fixincludes/configure
+@@ -696,6 +696,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/gcc/Makefile.in b/gcc/Makefile.in
+index 7270284..f8004d3 100644
+--- a/gcc/Makefile.in
++++ b/gcc/Makefile.in
+@@ -60,6 +60,7 @@ build=@build@
+ host=@host@
+ target=@target@
+ target_noncanonical:=@target_noncanonical@
++host=occlum
+ 
+ # Sed command to transform gcc to installed name.
+ program_transform_name := @program_transform_name@
+@@ -692,9 +693,12 @@ DIR = ../gcc
+ # Native compiler for the build machine and its switches.
+ CC_FOR_BUILD = @CC_FOR_BUILD@
+ BUILD_CFLAGS= @BUILD_CFLAGS@ -DGENERATOR_FILE
++CC_FOR_BUILD=gcc
+ 
+ # Native linker and preprocessor flags.  For x-fragment overrides.
+-BUILD_LDFLAGS=@BUILD_LDFLAGS@
++# BUILD_LDFLAGS=@BUILD_LDFLAGS@
++# BUILD_LDFLAGS= @BUILD_LDFLAGS@
++BUILD_LDFLAGS=
+ BUILD_CPPFLAGS=$(ALL_CPPFLAGS)
+ 
+ # Actual name to use when installing a native compiler.
+diff --git a/gcc/configure b/gcc/configure
+index 64cdd91..730d184 100755
+--- a/gcc/configure
++++ b/gcc/configure
+@@ -834,6 +834,7 @@ done
+ build=$build_alias
+ host=$host_alias
+ target=$target_alias
++host=occlum
+ 
+ # FIXME: To remove some day.
+ if test "x$host_alias" != x; then
+@@ -845,6 +846,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/gcc/toplev.c b/gcc/toplev.c
+index d37c507..d30cd7b 100644
+--- a/gcc/toplev.c
++++ b/gcc/toplev.c
+@@ -528,6 +528,7 @@ read_integral_parameter (const char *p, const char *pname, const int  defval)
+    conflicts with the ISO C++ One Definition Rule.   */
+ 
+ #if GCC_VERSION < 3004 || !defined (__cplusplus)
++#if 0
+ 
+ /* Given X, an unsigned number, return the largest int Y such that 2**Y <= X.
+    If X is 0, return -1.  */
+@@ -578,7 +579,7 @@ exact_log2 (unsigned HOST_WIDE_INT x)
+   return floor_log2 (x);
+ #endif
+ }
+-
++#endif
+ #endif /*  GCC_VERSION < 3004 || !defined (__cplusplus)  */
+ 
+ /* Handler for fatal signals, such as SIGSEGV.  These are transformed
+@@ -2213,6 +2214,8 @@ do_compile (void)
+ int
+ toplev_main (unsigned int argc, const char **argv)
+ {
++  if(strncmp(argv[1],"-occlumquiet", strlen(argv[1])) == 0)
++    exit(0);
+   save_argv = argv;
+ 
+   /* Initialization of GCC's environment, and diagnostics.  */
+diff --git a/gcc/toplev.h b/gcc/toplev.h
+index 2324b06..5243093 100644
+--- a/gcc/toplev.h
++++ b/gcc/toplev.h
+@@ -168,10 +168,8 @@ extern bool fast_math_flags_set_p	(void);
+ extern bool fast_math_flags_struct_set_p (struct cl_optimization *);
+ 
+ /* Return log2, or -1 if not exact.  */
+-extern int exact_log2                  (unsigned HOST_WIDE_INT);
+ 
+ /* Return floor of log2, with -1 for zero.  */
+-extern int floor_log2                  (unsigned HOST_WIDE_INT);
+ 
+ /* Inline versions of the above for speed.  */
+ #if GCC_VERSION >= 3004
+@@ -186,13 +184,13 @@ extern int floor_log2                  (unsigned HOST_WIDE_INT);
+ #  define CTZ_HWI __builtin_ctz
+ # endif
+ 
+-extern inline int
++static inline int
+ floor_log2 (unsigned HOST_WIDE_INT x)
+ {
+   return x ? HOST_BITS_PER_WIDE_INT - 1 - (int) CLZ_HWI (x) : -1;
+ }
+ 
+-extern inline int
++static inline int
+ exact_log2 (unsigned HOST_WIDE_INT x)
+ {
+   return x == (x & -x) && x ? (int) CTZ_HWI (x) : -1;
+diff --git a/intl/configure b/intl/configure
+index 6605bb2..dee96ba 100755
+--- a/intl/configure
++++ b/intl/configure
+@@ -696,6 +696,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/libcpp/configure b/libcpp/configure
+index d36ed25..342ca1b 100755
+--- a/libcpp/configure
++++ b/libcpp/configure
+@@ -698,6 +698,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/libdecnumber/configure b/libdecnumber/configure
+index 9ff3a5e..f25b56c 100755
+--- a/libdecnumber/configure
++++ b/libdecnumber/configure
+@@ -698,6 +698,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/libiberty/configure b/libiberty/configure
+index 4cdcd72..f4ca331 100755
+--- a/libiberty/configure
++++ b/libiberty/configure
+@@ -696,6 +696,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/libiberty/pex-unix.c b/libiberty/pex-unix.c
+index 366e96e..6393b80 100644
+--- a/libiberty/pex-unix.c
++++ b/libiberty/pex-unix.c
+@@ -55,6 +55,7 @@ extern int errno;
+ #ifdef HAVE_SYS_STAT_H
+ #include <sys/stat.h>
+ #endif
++#include <spawn.h>
+ 
+ 
+ #ifdef vfork /* Autoconf may define this to fork for us. */
+@@ -370,6 +371,53 @@ pex_unix_exec_child (struct pex_obj *obj, int flags, const char *executable,
+ 
+   sleep_interval = 1;
+   pid = -1;
++  int s;
++  for (retries = 0; retries < 4; ++retries)
++    {
++      /* pid = vfork (); */
++
++      /* posix_spawnattr_t attr; */
++      /* posix_spawnattr_t *attrp; */
++      posix_spawn_file_actions_t file_actions;
++      posix_spawn_file_actions_t *fap= &file_actions;
++      s = posix_spawn_file_actions_init(fap);
++      if(in != STDIN_FILE_NO){
++        s = posix_spawn_file_actions_adddup2(fap, in, STDIN_FILE_NO);
++        s = posix_spawn_file_actions_addclose(fap, in);
++      }
++      if(out != STDOUT_FILE_NO){
++        s = posix_spawn_file_actions_adddup2(fap, out, STDOUT_FILE_NO);
++        s = posix_spawn_file_actions_addclose(fap, out);
++      }
++      if(errdes != STDERR_FILE_NO){
++        s = posix_spawn_file_actions_adddup2(fap, errdes, STDERR_FILE_NO);
++        s = posix_spawn_file_actions_addclose(fap, errdes);
++      }
++      if(toclose >=0){
++        s = posix_spawn_file_actions_addclose(fap, toclose);
++      }
++      if ((flags & PEX_STDERR_TO_STDOUT) != 0){
++        s = posix_spawn_file_actions_adddup2(fap, STDOUT_FILE_NO, STDERR_FILE_NO);
++      }
++
++
++      // if env is set, use env, otherwise use environ
++      if (!env)
++        env = environ;
++
++      if ((flags & PEX_SEARCH) != 0) {
++         s = posix_spawnp(&pid, executable,fap, NULL, argv, env);
++         /* pex_child_error (obj, executable, "execvp", errno); */
++       } else {
++         s = posix_spawn(&pid, executable, fap, NULL, argv, env);
++         /* pex_child_error (obj, executable, "execv", errno); */
++      }
++      if (pid >= 0)
++   break;
++      sleep (sleep_interval);
++      sleep_interval *= 2;
++    }
++#if 0
+   for (retries = 0; retries < 4; ++retries)
+     {
+       pid = vfork ();
+@@ -378,6 +426,7 @@ pex_unix_exec_child (struct pex_obj *obj, int flags, const char *executable,
+       sleep (sleep_interval);
+       sleep_interval *= 2;
+     }
++#endif
+ 
+   switch (pid)
+     {
+@@ -385,6 +434,7 @@ pex_unix_exec_child (struct pex_obj *obj, int flags, const char *executable,
+       *err = errno;
+       *errmsg = VFORK_STRING;
+       return (pid_t) -1;
++#if 0
+ 
+     case 0:
+       /* Child process.  */
+@@ -436,7 +486,7 @@ pex_unix_exec_child (struct pex_obj *obj, int flags, const char *executable,
+ 
+       /* NOTREACHED */
+       return (pid_t) -1;
+-
++#endif
+     default:
+       /* Parent process.  */
+       if (in != STDIN_FILE_NO)

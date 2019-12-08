@@ -1,0 +1,121 @@
+diff --git a/configure b/configure
+index 896c61f..dbc6f91 100755
+--- a/configure
++++ b/configure
+@@ -1438,6 +1438,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/demos/ppl_lcdd/ppl_lcdd.cc b/demos/ppl_lcdd/ppl_lcdd.cc
+index 8e2e2f4..e587e88 100644
+--- a/demos/ppl_lcdd/ppl_lcdd.cc
++++ b/demos/ppl_lcdd/ppl_lcdd.cc
+@@ -224,7 +224,7 @@ std::istream* input_stream_p = 0;
+ 
+ void
+ set_input(const char* file_name) {
+-  if (input_stream_p && *input_stream_p != std::cin)
++  if (input_stream_p && (input_stream_p != &std::cin))
+     delete input_stream_p;
+ 
+   if (file_name) {
+@@ -250,7 +250,7 @@ std::ostream* output_stream_p = 0;
+ 
+ void
+ set_output(const char* file_name) {
+-  if (output_stream_p && *output_stream_p != std::cout)
++  if (output_stream_p && (output_stream_p != &std::cout))
+     delete output_stream_p;
+ 
+   if (file_name) {
+diff --git a/demos/ppl_pips/ppl_pips.cc b/demos/ppl_pips/ppl_pips.cc
+index 3538cef..d1eb479 100644
+--- a/demos/ppl_pips/ppl_pips.cc
++++ b/demos/ppl_pips/ppl_pips.cc
+@@ -538,7 +538,7 @@ std::istream* input_stream_p = 0;
+ 
+ void
+ set_input(const char* file_name) {
+-  if (input_stream_p && *input_stream_p != std::cin)
++  if (input_stream_p && (input_stream_p != &std::cin))
+     delete input_stream_p;
+ 
+   if (file_name) {
+@@ -558,7 +558,7 @@ std::ostream* output_stream_p = 0;
+ 
+ void
+ set_output(const char* file_name) {
+-  if (output_stream_p && *output_stream_p != std::cout)
++  if (output_stream_p && (output_stream_p != &std::cout))
+     delete output_stream_p;
+ 
+   if (file_name) {
+diff --git a/src/Determinate_inlines.hh b/src/Determinate_inlines.hh
+index 43cdacb..4b81e74 100644
+--- a/src/Determinate_inlines.hh
++++ b/src/Determinate_inlines.hh
+@@ -287,8 +287,8 @@ operator()(Determinate& x, const Determinate& y) const {
+ 
+ template <typename PSET>
+ template <typename Binary_Operator_Assign>
+-inline
+-Determinate<PSET>::Binary_Operator_Assign_Lifter<Binary_Operator_Assign>
++inline typename
++Determinate<PSET>::template Binary_Operator_Assign_Lifter<Binary_Operator_Assign>
+ Determinate<PSET>::lift_op_assign(Binary_Operator_Assign op_assign) {
+   return Binary_Operator_Assign_Lifter<Binary_Operator_Assign>(op_assign);
+ }
+diff --git a/src/OR_Matrix_inlines.hh b/src/OR_Matrix_inlines.hh
+index f0e8349..0c6cf65 100644
+--- a/src/OR_Matrix_inlines.hh
++++ b/src/OR_Matrix_inlines.hh
+@@ -97,7 +97,8 @@ OR_Matrix<T>::Pseudo_Row<U>::Pseudo_Row(const Pseudo_Row<V>& y)
+ 
+ template <typename T>
+ template <typename U>
+-inline OR_Matrix<T>::Pseudo_Row<U>&
++/* inline OR_Matrix<T>::Pseudo_Row<U>& */
++inline typename OR_Matrix<T>::template Pseudo_Row<U>&
+ OR_Matrix<T>::Pseudo_Row<U>::operator=(const Pseudo_Row& y) {
+   first = y.first;
+ #if PPL_OR_MATRIX_EXTRA_DEBUG
+diff --git a/src/version.cc b/src/version.cc
+index 3337409..55d6b01 100644
+--- a/src/version.cc
++++ b/src/version.cc
+@@ -31,7 +31,7 @@ namespace {
+ const char version_string[] = PPL_PACKAGE_VERSION;
+ 
+ const char banner_string[] =
+-"This is "PPL_PACKAGE_NAME" (PPL) version "PPL_PACKAGE_VERSION".\n"
++"This is " PPL_PACKAGE_NAME" (PPL) version " PPL_PACKAGE_VERSION".\n"
+ "Copyright (C) 2001-2010 Roberto Bagnara <bagnara@cs.unipr.it>\n"
+ "Copyright (C) 2010-2013 BUGSENG srl (http://bugseng.com)\n"
+ "\n"
+@@ -42,18 +42,18 @@ const char banner_string[] =
+ #if defined(__COMO__)
+ #define str(s) # s
+ #define xstr(s) str(s)
+-"Compiled by the Comeau C++ compiler version "xstr(__COMO_VERSION__)".\n"
++"Compiled by the Comeau C++ compiler version " xstr(__COMO_VERSION__)".\n"
+ #elif defined(__INTEL_COMPILER)
+ #define str(s) # s
+ #define xstr(s) str(s)
+-"Compiled by the Intel C++ compiler version "xstr(__INTEL_COMPILER)".\n"
++"Compiled by the Intel C++ compiler version " xstr(__INTEL_COMPILER)".\n"
+ #elif defined(__GNUC__)
+-"Compiled by the GNU C++ compiler version "__VERSION__".\n"
++"Compiled by the GNU C++ compiler version " __VERSION__".\n"
+ #else
+ "Compiled by an unknown compiler.\n"
+ #endif
+ "\n"
+-"Report bugs to "PPL_PACKAGE_BUGREPORT"."
++"Report bugs to " PPL_PACKAGE_BUGREPORT"."
+ "  For the most up-to-date information\n"
+ "see the Parma Polyhedra Library site: http://bugseng.com/products/ppl/ .\n"
+ "\n"

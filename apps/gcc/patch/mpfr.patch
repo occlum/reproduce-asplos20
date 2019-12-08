@@ -1,0 +1,12 @@
+diff --git a/configure b/configure
+index 89d3433..05386ab 100755
+--- a/configure
++++ b/configure
+@@ -1265,6 +1265,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-

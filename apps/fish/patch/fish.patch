@@ -1,0 +1,25 @@
+diff --git a/src/exec.cpp b/src/exec.cpp
+index 0bbd872..aa448f1 100644
+--- a/src/exec.cpp
++++ b/src/exec.cpp
+@@ -671,7 +671,7 @@ static bool exec_external_command(const std::shared_ptr<job_t> &j, process_t *p,
+ 
+ #if FISH_USE_POSIX_SPAWN
+     // Prefer to use posix_spawn, since it's faster on some systems like OS X.
+-    bool use_posix_spawn = g_use_posix_spawn && can_use_posix_spawn_for_job(j, p);
++    bool use_posix_spawn = g_use_posix_spawn; // && can_use_posix_spawn_for_job(j, p);
+     if (use_posix_spawn) {
+         g_fork_count++;  // spawn counts as a fork+exec
+         // Create posix spawn attributes and actions.
+diff --git a/src/postfork.cpp b/src/postfork.cpp
+index dccef08..dba8c00 100644
+--- a/src/postfork.cpp
++++ b/src/postfork.cpp
+@@ -386,6 +386,7 @@ bool fork_actions_make_spawn_properties(posix_spawnattr_t *attr,
+ 
+     int err = 0;
+     if (!err) err = posix_spawnattr_setflags(attr, flags);
++    err = posix_spawnattr_setflags(attr, POSIX_SPAWN_USEVFORK);
+ 
+     if (!err && should_set_process_group_id)
+         err = posix_spawnattr_setpgroup(attr, desired_process_group_id);

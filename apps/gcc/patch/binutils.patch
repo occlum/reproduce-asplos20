@@ -1,0 +1,180 @@
+diff --git a/Makefile.in b/Makefile.in
+index cb0136e..b26c405 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -343,15 +343,19 @@ PWD_COMMAND = $${PWDCMD-pwd}
+ # environment.
+ AR_FOR_BUILD = @AR_FOR_BUILD@
+ AS_FOR_BUILD = @AS_FOR_BUILD@
+-CC_FOR_BUILD = @CC_FOR_BUILD@
+-CFLAGS_FOR_BUILD = @CFLAGS_FOR_BUILD@
++# CC_FOR_BUILD = @CC_FOR_BUILD@
++CC_FOR_BUILD = gcc
++# CFLAGS_FOR_BUILD = @CFLAGS_FOR_BUILD@
++CFLAGS_FOR_BUILD = 
+ CXXFLAGS_FOR_BUILD = @CXXFLAGS_FOR_BUILD@
+-CXX_FOR_BUILD = @CXX_FOR_BUILD@
++# CXX_FOR_BUILD = @CXX_FOR_BUILD@
++CXX_FOR_BUILD = gcc
+ DLLTOOL_FOR_BUILD = @DLLTOOL_FOR_BUILD@
+ GCJ_FOR_BUILD = @GCJ_FOR_BUILD@
+ GFORTRAN_FOR_BUILD = @GFORTRAN_FOR_BUILD@
+ GOC_FOR_BUILD = @GOC_FOR_BUILD@
+-LDFLAGS_FOR_BUILD = @LDFLAGS_FOR_BUILD@
++# LDFLAGS_FOR_BUILD = @LDFLAGS_FOR_BUILD@
++LDFLAGS_FOR_BUILD = 
+ LD_FOR_BUILD = @LD_FOR_BUILD@
+ NM_FOR_BUILD = @NM_FOR_BUILD@
+ RANLIB_FOR_BUILD = @RANLIB_FOR_BUILD@
+diff --git a/bfd/configure b/bfd/configure
+index 6e6283d..21fbcb0 100755
+--- a/bfd/configure
++++ b/bfd/configure
+@@ -1272,6 +1272,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/binutils/configure b/binutils/configure
+index ea013d1..2c44f4c 100755
+--- a/binutils/configure
++++ b/binutils/configure
+@@ -1256,6 +1256,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/configure b/configure
+index ad3dfb7..ca1f3b7 100755
+--- a/configure
++++ b/configure
+@@ -1293,6 +1293,7 @@ done
+ build=$build_alias
+ host=$host_alias
+ target=$target_alias
++host=occlum
+ 
+ # FIXME: To remove some day.
+ if test "x$host_alias" != x; then
+@@ -1304,6 +1305,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/etc/configure b/etc/configure
+index 2f8192a..8d0b390 100755
+--- a/etc/configure
++++ b/etc/configure
+@@ -1063,6 +1063,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/gas/configure b/gas/configure
+index 7b48a58..69e8d0f 100755
+--- a/gas/configure
++++ b/gas/configure
+@@ -1247,6 +1247,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/gold/configure b/gold/configure
+index 8240c28..8f40e3b 100755
+--- a/gold/configure
++++ b/gold/configure
+@@ -1281,6 +1281,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/gprof/configure b/gprof/configure
+index 4c17248..9b91ea3 100755
+--- a/gprof/configure
++++ b/gprof/configure
+@@ -1220,6 +1220,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/intl/configure b/intl/configure
+index d7af03f..b47144c 100755
+--- a/intl/configure
++++ b/intl/configure
+@@ -1160,6 +1160,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/ld/configure b/ld/configure
+index c6f871d..72b3ee0 100755
+--- a/ld/configure
++++ b/ld/configure
+@@ -1272,6 +1272,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/libiberty/configure b/libiberty/configure
+index bde78ff..90607e4 100755
+--- a/libiberty/configure
++++ b/libiberty/configure
+@@ -1148,6 +1148,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/opcodes/configure b/opcodes/configure
+index 5a4da06..1e35ae0 100755
+--- a/opcodes/configure
++++ b/opcodes/configure
+@@ -1240,6 +1240,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
+diff --git a/zlib/configure b/zlib/configure
+index bba9fd2..375c0c2 100755
+--- a/zlib/configure
++++ b/zlib/configure
+@@ -1205,6 +1205,7 @@ if test "x$host_alias" != x; then
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-

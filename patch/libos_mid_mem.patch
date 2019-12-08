@@ -1,0 +1,29 @@
+diff --git a/src/libos/src/process/spawn/init_vm.rs b/src/libos/src/process/spawn/init_vm.rs
+index 9a0fc11..875ce56 100644
+--- a/src/libos/src/process/spawn/init_vm.rs
++++ b/src/libos/src/process/spawn/init_vm.rs
+@@ -3,9 +3,9 @@ use super::*;
+ use std::ptr;
+ use xmas_elf::{header, program, sections, ElfFile};
+ 
+-pub const DEFAULT_STACK_SIZE: usize = 1 * 1024 * 1024;
+-pub const DEFAULT_HEAP_SIZE: usize = 8 * 1024 * 1024;
+-pub const DEFAULT_MMAP_SIZE: usize = 8 * 1024 * 1024;
++pub const DEFAULT_STACK_SIZE: usize = 2 * 1024 * 1024;
++pub const DEFAULT_HEAP_SIZE: usize = 10 * 1024 * 1024;
++pub const DEFAULT_MMAP_SIZE: usize = 30 * 1024 * 1024;
+ 
+ pub fn do_init(elf_file: &ElfFile, elf_buf: &[u8]) -> Result<ProcessVM, Error> {
+     let mut code_seg = get_code_segment(elf_file)?;
+diff --git a/src/libos/src/vm/vm_space_prealloced.c b/src/libos/src/vm/vm_space_prealloced.c
+index 60f81a8..2f2dabf 100644
+--- a/src/libos/src/vm/vm_space_prealloced.c
++++ b/src/libos/src/vm/vm_space_prealloced.c
+@@ -1,6 +1,6 @@
+ #include <stddef.h>
+ 
+-#define DATA_SPACE_SIZE (128*1024*1024)
++#define DATA_SPACE_SIZE (256*1024*1024)
+ 
+ static char __prealloced_data_space[DATA_SPACE_SIZE]
+     __attribute__ ((

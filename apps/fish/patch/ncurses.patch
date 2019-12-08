@@ -1,0 +1,11 @@
+diff -ruN ./configure ../ncurses/configure
+--- ./configure	2015-08-05 17:20:32.000000000 +0800
++++ ../ncurses/configure	2019-12-04 22:20:10.710982067 +0800
+@@ -540,6 +540,7 @@
+     cross_compiling=yes
+   fi
+ fi
++    cross_compiling=yes
+ 
+ ac_tool_prefix=
+ test -n "$host_alias" && ac_tool_prefix=$host_alias-
